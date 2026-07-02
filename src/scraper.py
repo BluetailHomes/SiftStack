@@ -49,6 +49,22 @@ async def delay() -> None:
     await asyncio.sleep(wait)
 
 
+def _has_placeholder_credentials() -> bool:
+    """Return True when the configured TNPN credentials are blank or still placeholders."""
+    email = (config.TNPN_EMAIL or "").strip()
+    password = (config.TNPN_PASSWORD or "").strip()
+    placeholder_values = {
+        "",
+        "your_email@example.com",
+        "your_password_here",
+        "email@example.com",
+        "password",
+        "changeme",
+        "changeme123",
+    }
+    return not email or not password or email.lower() in {v.lower() for v in placeholder_values} or password.lower() in {v.lower() for v in placeholder_values}
+
+
 # ── Login ─────────────────────────────────────────────────────────────
 
 
@@ -58,6 +74,10 @@ async def login(page: Page, _retries: int = 3) -> bool:
     Retries up to ``_retries`` times on transient network errors (e.g. after
     Apify container migration).
     """
+    if _has_placeholder_credentials():
+        logger.error("TNPN credentials are not configured — refusing to attempt login because the values are blank or still placeholder values")
+        return False
+
     for attempt in range(1, _retries + 1):
         try:
             logger.info("Logging in to %s (attempt %d/%d)", LOGIN_URL, attempt, _retries)
@@ -85,12 +105,20 @@ async def login(page: Page, _retries: int = 3) -> bool:
         return True
 
     # Check for error message
+    try:
+        body_text = await page.locator("body").inner_text()
+        body_text_snippet = " ".join(body_text.split())[:2000]
+    except Exception:
+        body_text_snippet = ""
+
     error = await page.query_selector(".error, .validation-summary-errors")
     if error:
         msg = await error.inner_text()
         logger.error("Login failed: %s", msg.strip())
     else:
         logger.error("Login failed — landed on %s", page.url)
+    if body_text_snippet:
+        logger.error("Login response body snippet: %s", body_text_snippet)
     return False
 
 

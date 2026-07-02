@@ -65,25 +65,25 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen-2.5-72b-instruct")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
 # ── Site URLs ──────────────────────────────────────────────────────────
-BASE_URL = "https://www.tnpublicnotice.com"
+BASE_URL = "https://www.mopublicnotices.com"
 LOGIN_URL = f"{BASE_URL}/authenticate.aspx"
-SMART_SEARCH_URL = f"{BASE_URL}/Smartsearch/Default.aspx"
+SMART_SEARCH_URL = f"{BASE_URL}/SmartSearch/Default.aspx"
 
 # ── ASP.NET Selectors ─────────────────────────────────────────────────
-# Login form
+# Login form (verified on authenticate.aspx)
 SEL_LOGIN_EMAIL = "#ctl00_ContentPlaceHolder1_AuthenticateIPA1_txtEmailAddress"
 SEL_LOGIN_PASSWORD = "#ctl00_ContentPlaceHolder1_AuthenticateIPA1_txtPassword"
 SEL_LOGIN_SUBMIT = "#ctl00_ContentPlaceHolder1_AuthenticateIPA1_btnAuth"
 
-# Smart Search dashboard
-SEL_SAVED_SEARCHES_DROPDOWN = "#ctl00_ContentPlaceHolder1_as1_ddlSavedSearches"
+# Smart Search dashboard / saved searches
+SEL_SAVED_SEARCHES_DROPDOWN = "#ctl00_as1_ddlSavedSearches"
 SEL_PER_PAGE_DROPDOWN = 'select[name$="ddlPerPage"]'
 
-# Search results (authenticated grid)
+# Search results (verified on Search.aspx)
 SEL_RESULTS_GRID = "#ctl00_ContentPlaceHolder1_WSExtendedGrid1_GridView1"
-SEL_VIEW_BUTTON_PATTERN = "input[name$='btnView']"
-SEL_NEXT_PAGE_BUTTON = "input[title='Next page']"
-SEL_PAGE_INFO = "td:has-text('Page ')"
+SEL_VIEW_BUTTON_PATTERN = "input[name$='btnView2'], input[name$='btnView']"
+SEL_NEXT_PAGE_BUTTON = "#ctl00_ContentPlaceHolder1_WSExtendedGrid1_GridView1_ctl01_btnNext"
+SEL_PAGE_INFO = "table.wsResultsGrid"
 
 # Notice detail page
 SEL_CAPTCHA_IFRAME = "iframe[src*='recaptcha']"
@@ -107,7 +107,7 @@ NOTICE_TYPES = ["foreclosure", "probate"]
 
 @dataclass
 class SavedSearch:
-    """Represents a saved search on tnpublicnotice.com."""
+    """Represents a saved search on mopublicnotices.com."""
     county: str
     notice_type: str  # One of NOTICE_TYPES
     saved_search_name: str  # Exact name in the Saved Searches dropdown
@@ -115,9 +115,12 @@ class SavedSearch:
 
 # ── Saved Searches ─────────────────────────────────────────────────────
 # These names must match exactly what appears in the dropdown on the site.
+# Create the dropdown entries with these exact labels before the first real run.
 SAVED_SEARCHES: list[SavedSearch] = [
-    SavedSearch("Knox", "foreclosure", "Foreclosure V2 Knox"),
-    SavedSearch("Blount", "foreclosure", "Foreclosure V2 Blount"),
+    SavedSearch("Jackson", "probate", "Jackson County Probate"),
+    SavedSearch("Clay", "probate", "Clay County Probate"),
+    SavedSearch("Platte", "probate", "Platte County Probate"),
+    SavedSearch("Cass", "probate", "Cass County Probate"),
 ]
 
 # ── Entity Detection ──────────────────────────────────────────────────
