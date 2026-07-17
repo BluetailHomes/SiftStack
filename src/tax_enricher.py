@@ -1,7 +1,10 @@
 """Enrich notices with tax delinquency data from county property tax APIs.
 
-Knox County: https://knox-tn.mygovonline.com/api/v2
-Blount County: TBD (placeholder)
+Knox County (TN, dormant/legacy market): https://knox-tn.mygovonline.com/api/v2
+No other county — Blount, or any of the 8 active OK/MO/KS/NM counties — has
+a working tax-delinquency API integration yet. None of them have a documented
+public API like Knox's; see config.COUNTIES[county].assessor_url for each
+county's assessor site (reference only, HTML search forms not APIs).
 """
 
 import logging
@@ -307,7 +310,10 @@ def enrich_tax_delinquency(notices: list[NoticeData]) -> None:
     Updates notices in-place, setting tax_delinquent_amount and
     tax_delinquent_years fields.
 
-    Currently supports Knox County only. Blount County is a placeholder.
+    Currently supports Knox County only (dormant/legacy market). Every other
+    county — including all 8 active OK/MO/KS/NM counties — is skipped
+    gracefully (logged, not mislabeled) since no tax API integration exists
+    for them yet.
     """
     knox_notices = [
         n for n in notices
@@ -365,10 +371,18 @@ def enrich_tax_delinquency(notices: list[NoticeData]) -> None:
         # Rate limit
         time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
 
-    blount_count = sum(1 for n in notices if n.county.lower() == "blount")
-    if blount_count:
-        logger.info("Skipped %d Blount County notices (tax API not yet implemented)", blount_count)
-        skipped = blount_count
+    other_counties = [n.county for n in notices if n.county.lower() != "knox"]
+    if other_counties:
+        skipped = len(other_counties)
+        by_county: dict[str, int] = {}
+        for c in other_counties:
+            by_county[c] = by_county.get(c, 0) + 1
+        breakdown = ", ".join(f"{c}: {n}" for c, n in sorted(by_county.items()))
+        logger.info(
+            "Skipped %d non-Knox notices (no tax API configured — %s). "
+            "See config.COUNTIES[county].assessor_url for reference-only assessor sites.",
+            skipped, breakdown,
+        )
 
     logger.info(
         "Tax delinquency enrichment complete: %d enriched, %d failed, %d skipped",

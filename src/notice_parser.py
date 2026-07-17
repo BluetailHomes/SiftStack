@@ -22,6 +22,8 @@ from datetime import datetime
 
 from playwright.async_api import Page
 
+import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,7 +34,7 @@ class NoticeData:
     auction_date: str = ""     # Scheduled sale/auction date (YYYY-MM-DD)
     address: str = ""
     city: str = ""
-    state: str = "TN"
+    state: str = ""  # populated from config.COUNTIES via the notice's county (see parse_notice_page)
     zip: str = ""
     owner_name: str = ""
     notice_type: str = ""      # foreclosure | tax_sale | tax_lien | probate
@@ -134,8 +136,11 @@ class NoticeData:
     run_id: str = ""                   # Unique pipeline run identifier for data lineage
 
 
-# ── Known TN cities in Knox & Blount counties ─────────────────────────
-# Sorted longest-first so "Lenoir City" matches before "City"
+# ── Known cities for city-fallback matching ────────────────────────────
+# Sorted longest-first so "Lenoir City" matches before "City". Originally
+# Knox/Blount-only (kept below as those markets are dormant, not deleted);
+# extended with every operating county's seat/major city from config.COUNTIES
+# so the same fallback works across all active markets.
 TN_CITIES: list[str] = sorted(
     [
         "Knoxville", "Maryville", "Alcoa", "Farragut", "Powell",
@@ -150,8 +155,14 @@ TN_CITIES: list[str] = sorted(
     reverse=True,
 )
 
+KNOWN_CITIES: list[str] = sorted(
+    {*TN_CITIES, *(p.major_city for p in config.COUNTIES.values())},
+    key=len,
+    reverse=True,
+)
+
 # Set version for O(1) membership tests in standalone address validation
-_KNOWN_CITIES_SET: set[str] = {c.title() for c in TN_CITIES}
+_KNOWN_CITIES_SET: set[str] = {c.title() for c in KNOWN_CITIES}
 
 # ── Reusable suffix pattern ──────────────────────────────────────────
 # Word-boundary at the end prevents matching "Cir" inside "Circuit", etc.
@@ -202,10 +213,22 @@ _PROP_INDICATOR = (
     r")"
 )
 
-# Optional ", Knox County" or ", Blount County" between city and state
+# Optional ", Knox County" or ", Jackson County" between city and state
 _OPTIONAL_COUNTY = r"(?:\s*[,.]\s*\w+\s+County)?"
 
-# FULL match: indicator + address + city + [county] + Tennessee/TN + zip
+# Accepts the full name or common abbreviation of any state we operate in
+# (see config.COUNTIES) instead of hardcoding Tennessee/TN. Kept as a static
+# alternation since the set of states is small and stable — extend it here
+# alongside config.COUNTIES if a new state is added.
+_STATE_TOKEN = (
+    r"(?:Tennessee|Tenn\.?|TN"
+    r"|Missouri|Mo\.?|MO"
+    r"|Oklahoma|Okla\.?|OK"
+    r"|Kansas|Kan\.?|KS"
+    r"|New\s+Mexico|N\.?M\.?|NM)"
+)
+
+# FULL match: indicator + address + city + [county] + state + zip
 # Captures (address, city, zip) all from the same context.
 FULL_PROPERTY_RE = re.compile(
     _PROP_INDICATOR
@@ -216,7 +239,7 @@ FULL_PROPERTY_RE = re.compile(
     + r"([\w][\w\s]*?)"           # city name
     + _OPTIONAL_COUNTY
     + r"\s*[,.]\s*"
-    + r"(?:Tennessee|Tenn\.?|TN)"
+    + _STATE_TOKEN
     + r"\s*[,.\s]*"
     + r"(\d{5}(?:-\d{4})?)?",     # optional zip
     re.IGNORECASE,
@@ -228,7 +251,7 @@ PROPERTY_ADDR_RE = re.compile(
     re.IGNORECASE,
 )
 
-# "located at ADDRESS, CITY, TN ZIP" — secondary, used for tax sales
+# "located at ADDRESS, CITY, STATE ZIP" — secondary, used for tax sales
 # We validate the result against the blacklist to filter auction locations.
 LOCATED_AT_FULL_RE = re.compile(
     r"located\s+at\s+"
@@ -237,7 +260,7 @@ LOCATED_AT_FULL_RE = re.compile(
     + r"([\w][\w\s]*?)"
     + _OPTIONAL_COUNTY
     + r"\s*[,.]\s*"
-    + r"(?:Tennessee|Tenn\.?|TN)"
+    + _STATE_TOKEN
     + r"\s*[,.\s]*"
     + r"(\d{5}(?:-\d{4})?)?",
     re.IGNORECASE,
@@ -248,7 +271,7 @@ LOCATED_AT_ADDR_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Standalone "ADDRESS, CITY, TN ZIP" — no indicator phrase required.
+# Standalone "ADDRESS, CITY, STATE ZIP" — no indicator phrase required.
 # Only used for tax_sale / tax_lien notices as a last resort before giving up.
 STANDALONE_ADDR_RE = re.compile(
     _ADDR_PART
@@ -256,7 +279,7 @@ STANDALONE_ADDR_RE = re.compile(
     + r"([\w][\w\s]*?)"           # city name
     + _OPTIONAL_COUNTY
     + r"\s*[,.]\s*"
-    + r"(?:Tennessee|Tenn\.?|TN)"
+    + _STATE_TOKEN
     + r"\s*[,.\s]*"
     + r"(\d{5}(?:-\d{4})?)?",     # optional zip
     re.IGNORECASE,
@@ -315,9 +338,20 @@ def _is_valid_address(addr: str) -> bool:
     return True
 
 
-# ── TN zip code ──────────────────────────────────────────────────────
-# TN zips range from 37010 to 38589 — require 37xxx or 38xxx prefix
-ZIP_RE = re.compile(r"\b(3[78]\d{3})(?:-\d{4})?\b")
+# ── ZIP code ─────────────────────────────────────────────────────────
+# Broad prefix ranges for every state we operate in (see config.COUNTIES),
+# used only as a soft heuristic to recognize "this looks like a real ZIP"
+# rather than an exact boundary check: TN 370xx-389xx, MO 630xx-659xx,
+# OK 730xx-749xx, KS 660xx-679xx, NM 870xx-884xx.
+ZIP_RE = re.compile(
+    r"\b("
+    r"3[78]\d{3}"        # TN
+    r"|6[3-5]\d{3}"       # MO
+    r"|7[34]\d{3}"        # OK
+    r"|66\d{3}|67\d{3}"   # KS
+    r"|8[78]\d{3}"        # NM
+    r")(?:-\d{4})?\b"
+)
 
 # Zips to reject when found via fallback (no address context):
 # Courthouse / auction / law-office zips that commonly appear in notice text
@@ -329,10 +363,12 @@ _COURTHOUSE_ZIPS = {
     "37219",  # Nashville (state offices)
 }
 
-# Expected zip prefixes by county (for fallback validation)
+# Expected zip prefixes by county (for fallback validation) — sourced from
+# config.COUNTIES so every operating market is covered, not just Knox/Blount.
+# These are approximate (metro-area 3-digit prefixes often span county lines),
+# used only as a soft plausibility check, not an authoritative boundary.
 _COUNTY_ZIP_PREFIXES: dict[str, list[str]] = {
-    "Knox":   ["377", "378", "379"],
-    "Blount": ["377", "378"],
+    p.county: p.zip_prefixes for p in config.COUNTIES.values()
 }
 
 
@@ -453,7 +489,7 @@ PR_ADDRESS_RE = re.compile(
     r"\s*[,.\s]+\s*"
     r"([A-Za-z][\w\s]*?)"             # city
     r"\s*[,.]\s*"
-    r"(?:Tennessee|Tenn\.?|TN)"
+    + _STATE_TOKEN +
     r"\s*[,.\s]*"
     r"(\d{5})",                        # zip
     re.IGNORECASE,
@@ -583,20 +619,23 @@ _COURTHOUSE_COUNTY_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Counties we care about — notices for other counties are false positives
-_TARGET_COUNTIES = {"knox", "blount"}
+# Counties we care about — notices for other counties are false positives.
+# Derived from config.COUNTIES so every operating market (active or dormant)
+# is recognized, instead of hardcoding a single market's county names.
+_TARGET_COUNTIES = set(config.COUNTIES.keys())
 
 
 def is_target_county(text: str, search_county: str) -> bool:
     """Check if the notice's actual property county matches our target counties.
 
-    The search may return notices that merely *mention* Knox County (e.g. the
-    trustee is from Knox County) but the actual property is in Hamilton, Hardeman,
-    Union, etc.  We detect this by looking at Register's Office and Courthouse
-    references which indicate where the property actually is.
+    The search may return notices that merely *mention* a nearby county (e.g. the
+    trustee is from a different county) but the actual property is elsewhere.
+    We detect this by looking at Register's Office and Courthouse references
+    which indicate where the property actually is.
 
-    Returns True if the property appears to be in Knox or Blount County (or if
-    we can't determine the county — benefit of the doubt).
+    Returns True if the property appears to be in one of our operating counties
+    (see config.COUNTIES), or if we can't determine the county (benefit of the
+    doubt).
     """
     # Find all Register's Office mentions — the first one is typically the
     # property's recording county (later mentions may be trustee appointments)
@@ -698,6 +737,7 @@ async def parse_notice_page(
         county=county,
         notice_type=notice_type,
         source_url=page.url,
+        state=config.state_for_county(county),
     )
 
     # Get the full page text (includes both metadata labels and notice body)
@@ -754,7 +794,7 @@ async def parse_notice_page(
             if not notice.owner_street and llm_result.get("owner_street"):
                 notice.owner_street = llm_result["owner_street"]
                 notice.owner_city = llm_result.get("owner_city") or notice.owner_city
-                notice.owner_state = llm_result.get("owner_state") or "TN"
+                notice.owner_state = llm_result.get("owner_state") or notice.state
                 notice.owner_zip = llm_result.get("owner_zip") or notice.owner_zip
                 logger.info("LLM filled PR address: %s", notice.owner_street)
         else:
@@ -951,11 +991,11 @@ def _extract_city_zip_near(notice: NoticeData, text: str, addr_end: int) -> None
     """
     window = text[addr_end:addr_end + 200]
 
-    # Try "CITY, [County,] TN ZIP" or "CITY, [County,] Tennessee ZIP"
+    # Try "CITY, [County,] STATE ZIP"
     city_state_re = re.compile(
         r"[,.\s]+([\w][\w\s]*?)"
         r"(?:\s*[,.]\s*\w+\s+County)?"   # optional county
-        r"\s*[,.]\s*(?:Tennessee|Tenn\.?|TN)"
+        r"\s*[,.]\s*" + _STATE_TOKEN +
         r"\s*[,.\s]*(\d{5}(?:-\d{4})?)?",
         re.IGNORECASE,
     )
@@ -968,7 +1008,7 @@ def _extract_city_zip_near(notice: NoticeData, text: str, addr_end: int) -> None
 
     # Fallback: find a known TN city in the window
     window_upper = window.upper()
-    for city in TN_CITIES:
+    for city in KNOWN_CITIES:
         if city.upper() in window_upper:
             notice.city = city
             break
@@ -997,7 +1037,7 @@ def _extract_city_zip_fallback(notice: NoticeData, text: str) -> None:
     """
     if not notice.city:
         text_upper = text.upper()
-        for city in TN_CITIES:
+        for city in KNOWN_CITIES:
             if city.upper() in text_upper:
                 notice.city = city
                 break
@@ -1088,11 +1128,11 @@ def _parse_pr_address(notice: NoticeData) -> None:
             street = street.title()
         notice.owner_street = street
         notice.owner_city = _clean_city(match.group(2))
-        notice.owner_state = "TN"
+        notice.owner_state = notice.state
         notice.owner_zip = match.group(3)
         logger.debug(
-            "PR address: %s, %s, TN %s",
-            notice.owner_street, notice.owner_city, notice.owner_zip,
+            "PR address: %s, %s, %s %s",
+            notice.owner_street, notice.owner_city, notice.owner_state, notice.owner_zip,
         )
 
 

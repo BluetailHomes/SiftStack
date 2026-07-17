@@ -16,6 +16,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+import config
 from config import OUTPUT_DIR
 from notice_parser import NoticeData
 
@@ -440,7 +441,7 @@ def _build_heir_summary(notice: NoticeData) -> str:
             street = h.get("street", "")
             if street:
                 city = h.get("city", "")
-                state = h.get("state", "TN")
+                state = h.get("state") or notice.state
                 zip_code = h.get("zip", "")
                 addr_parts = [street]
                 if city:
@@ -704,7 +705,7 @@ def _build_row(notice: NoticeData, notes_override: str | None = None) -> dict:
         # ── Core auto-mapped ──
         "Property Street Address": notice.address,
         "Property City": notice.city,
-        "Property State": notice.state or "TN",
+        "Property State": notice.state or config.state_for_county(notice.county),
         "Property ZIP Code": notice.zip,
         "Owner First Name": contact["first"],
         "Owner Last Name": contact["last"],

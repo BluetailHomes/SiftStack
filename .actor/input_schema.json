@@ -2,7 +2,7 @@
     "title": "SiftStack Input",
     "type": "object",
     "schemaVersion": 1,
-    "required": ["mode", "tn_username", "tn_password", "captcha_api_key"],
+    "required": ["mode", "notice_site_username", "notice_site_password", "captcha_api_key"],
     "properties": {
         "mode": {
             "title": "Scrape Mode",
@@ -15,7 +15,7 @@
         "counties": {
             "title": "Counties",
             "type": "array",
-            "description": "Counties to scrape. Leave empty for all (Knox + Blount).",
+            "description": "Counties to scrape. Leave empty for all active counties (see COUNTIES in src/config.py — currently Jackson, Clay, Platte, Cass).",
             "items": { "type": "string" },
             "default": [],
             "editor": "stringList"
@@ -43,17 +43,17 @@
             "minimum": 1,
             "editor": "number"
         },
-        "tn_username": {
-            "title": "tnpublicnotice.com Email",
+        "notice_site_username": {
+            "title": "Notice Site Email",
             "type": "string",
-            "description": "Login email for tnpublicnotice.com Smart Search",
+            "description": "Login email for the active public-notice site's Smart Search (see COUNTIES in src/config.py — currently mopublicnotices.com for the live counties).",
             "editor": "textfield",
             "isSecret": true
         },
-        "tn_password": {
-            "title": "tnpublicnotice.com Password",
+        "notice_site_password": {
+            "title": "Notice Site Password",
             "type": "string",
-            "description": "Login password for tnpublicnotice.com",
+            "description": "Login password for the active public-notice site.",
             "editor": "textfield",
             "isSecret": true
         },

@@ -2,7 +2,7 @@
 
 Runs as either:
   - Apify Actor (when APIFY_IS_AT_HOME is set — reads input from Actor.get_input())
-  - Standalone CLI (python src/main.py daily --counties Knox --types foreclosure)
+  - Standalone CLI (python src/main.py daily --counties Jackson,Clay --types foreclosure)
 """
 
 import argparse
@@ -64,8 +64,8 @@ def _preflight_check(mode: str) -> list[str]:
     datasift_modes = {"manage-presets", "manage-sold", "phone-validate"}
 
     if mode in scrape_modes:
-        if not config.TNPN_EMAIL or not config.TNPN_PASSWORD:
-            failures.append("TNPN_EMAIL / TNPN_PASSWORD not set (required for scraping)")
+        if not config.NOTICE_SITE_EMAIL or not config.NOTICE_SITE_PASSWORD:
+            failures.append("NOTICE_SITE_EMAIL / NOTICE_SITE_PASSWORD not set (required for scraping)")
         if not config.CAPTCHA_API_KEY:
             failures.append("CAPTCHA_API_KEY not set (CAPTCHA solving will fail)")
 
@@ -96,9 +96,9 @@ def _preflight_check(mode: str) -> list[str]:
         try:
             resp = _requests.head(config.BASE_URL, timeout=10, allow_redirects=True)
             if resp.status_code >= 500:
-                failures.append(f"tnpublicnotice.com returned {resp.status_code} — site may be down")
+                failures.append(f"{config.BASE_URL} returned {resp.status_code} — site may be down")
         except Exception as e:
-            failures.append(f"Cannot reach tnpublicnotice.com: {e}")
+            failures.append(f"Cannot reach {config.BASE_URL}: {e}")
 
     # ── 2Captcha balance check ──────────────────────────────────────
     if mode in scrape_modes and config.CAPTCHA_API_KEY:
@@ -149,8 +149,8 @@ async def actor_main() -> None:
         # Set both config.* AND os.environ so downstream modules that read
         # from either source (e.g., datasift_uploader uses os.environ) pick them up.
         _cred_map = {
-            "TNPN_EMAIL": actor_input.get("tn_username", ""),
-            "TNPN_PASSWORD": actor_input.get("tn_password", ""),
+            "NOTICE_SITE_EMAIL": actor_input.get("notice_site_username", "") or actor_input.get("tn_username", ""),
+            "NOTICE_SITE_PASSWORD": actor_input.get("notice_site_password", "") or actor_input.get("tn_password", ""),
             "CAPTCHA_API_KEY": actor_input.get("captcha_api_key", ""),
             "ANTHROPIC_API_KEY": actor_input.get("anthropic_api_key", ""),
             "SMARTY_AUTH_ID": actor_input.get("smarty_auth_id", ""),
@@ -187,11 +187,11 @@ async def actor_main() -> None:
         include_entities = actor_input.get("include_entities", False)
 
         # Validate
-        if not config.TNPN_EMAIL or not config.TNPN_PASSWORD:
-            Actor.log.error("tn_username and tn_password are required")
+        if not config.NOTICE_SITE_EMAIL or not config.NOTICE_SITE_PASSWORD:
+            Actor.log.error("notice_site_username and notice_site_password are required")
             try:
                 from slack_notifier import notify_preflight_failure
-                notify_preflight_failure(["TNPN credentials missing"])
+                notify_preflight_failure(["Notice site credentials missing"])
             except Exception:
                 pass
             await Actor.fail(status_message="Missing SiftStack credentials")
@@ -987,7 +987,7 @@ def _run_manage_sold(args) -> None:
     """Run the SiftMap sold properties management workflow."""
     from datasift_uploader import run_manage_sold_workflow
 
-    # Parse counties if provided, otherwise use default (Knox, Blount)
+    # Parse counties if provided, otherwise use default (all active counties)
     counties = None
     if args.counties and args.counties.lower() != "all":
         counties = [c.strip().title() for c in args.counties.split(",")]
@@ -1038,7 +1038,7 @@ def cli_main() -> None:
         "--counties",
         type=str,
         default=None,
-        help='Comma-separated counties to scrape (e.g. "Knox,Blount" or "all")',
+        help='Comma-separated counties to scrape (e.g. "Jackson,Clay" or "all")',
     )
     parser.add_argument(
         "--types",
@@ -1068,6 +1068,11 @@ def cli_main() -> None:
         action="store_true",
         help="Enable debug logging",
     )
+    parser.add_argument(
+        "--headed",
+        action="store_true",
+        help="Run the scraper browser headed (visible) instead of headless — for debugging stuck/timing-out pages",
+    )
 
     # PDF import arguments
     parser.add_argument(
@@ -1080,7 +1085,7 @@ def cli_main() -> None:
         "--pdf-county",
         type=str,
         default=None,
-        help='County name for PDF import, e.g. "Knox" (required for pdf-import mode)',
+        help='County name for PDF import, e.g. "Jackson" (required for pdf-import mode)',
     )
     parser.add_argument(
         "--pdf-date",
@@ -1105,7 +1110,7 @@ def cli_main() -> None:
         type=str,
         default=None,
         dest="photo_county",
-        help='County name for photo import, e.g. "Knox" (required for photo-import mode)',
+        help='County name for photo import, e.g. "Jackson" (required for photo-import mode)',
     )
     parser.add_argument(
         "--photo-type",
@@ -1158,7 +1163,7 @@ def cli_main() -> None:
         "--csv-county",
         type=str,
         default=None,
-        help='County name for CSV import, e.g. "Knox" (sets county for records missing it)',
+        help='County name for CSV import, e.g. "Jackson" (sets county for records missing it)',
     )
 
     parser.add_argument(
@@ -1723,6 +1728,7 @@ def _run_scrape_pipeline(args, searches) -> None:
         llm_api_key=config.ANTHROPIC_API_KEY or None,
         since_date_override=args.since,
         max_notices=args.max_notices,
+        headless=not args.headed,
     ))
     # Handle async probate lookup before pipeline (requires asyncio.run)
     probate_notices = [n for n in notices if n.notice_type == "probate" and n.decedent_name and not n.address]

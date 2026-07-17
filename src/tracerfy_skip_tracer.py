@@ -164,6 +164,7 @@ def _lookup_missing_heir_addresses(
         try:
             addr = _lookup_dm_address(
                 heir_name, city_hint, api_key or "", tracerfy_tier1=False,
+                county=notice.county, state=notice.state,
             )
         except Exception as e:
             logger.debug("Heir address lookup failed for %s: %s", heir_name, e)
@@ -171,7 +172,7 @@ def _lookup_missing_heir_addresses(
         if addr and addr.get("street"):
             heir["street"] = addr.get("street", "")
             heir["city"] = addr.get("city", "") or city_hint
-            heir["state"] = addr.get("state", "") or "TN"
+            heir["state"] = addr.get("state", "") or notice.state
             heir["zip"] = addr.get("zip", "")
             heir["address_source"] = addr.get("source", "")
             filled += 1
@@ -276,7 +277,7 @@ def batch_skip_trace(
     writer.writerow(["first_name", "last_name", "address", "city", "state",
                      "zip", "mail_address", "mail_city", "mail_state"])
     for notice_ref, first, last, address, city, zip_code, _ in lookup_map:
-        state = notice_ref.state or "TN"
+        state = notice_ref.state
         writer.writerow([first, last, address, city, state, zip_code, "", "", ""])
     csv_content = csv_buffer.getvalue()
     csv_buffer.close()

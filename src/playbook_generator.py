@@ -1,7 +1,7 @@
 """Acquisition playbook generator with SOPs, scripts, and daily checklists.
 
 Generates custom playbooks based on investment blueprint (wholesale/flip/hold),
-market (Knoxville/Blount), and team size (solo to full operation).
+market (any city/county in config.COUNTIES), and team size (solo to full operation).
 
 Output:
   - Markdown playbook document (comprehensive SOP)
@@ -297,11 +297,19 @@ def generate_playbook(blueprint: str = "wholesale", market: str = "knoxville",
     team = TEAM_CONFIGS.get(team_size, TEAM_CONFIGS[1])
     market_name = market.title()
 
+    # Try to resolve a state from the market's city name (matched against
+    # each active county's major_city) instead of hardcoding Tennessee.
+    market_lower = market.strip().lower()
+    matched_profile = next(
+        (p for p in config.COUNTIES.values() if p.major_city.lower() == market_lower), None,
+    )
+    market_state_suffix = f", {matched_profile.state_full}" if matched_profile else ""
+
     lines = []
     lines.append(f"# {bp['name']} Acquisition Playbook — {market_name}")
     lines.append(f"")
     lines.append(f"**Blueprint:** {bp['name']} — {bp['description']}")
-    lines.append(f"**Market:** {market_name}, Tennessee")
+    lines.append(f"**Market:** {market_name}{market_state_suffix}")
     lines.append(f"**Team:** {team['name']} ({team_size} {'person' if team_size == 1 else 'people'})")
     lines.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d')}")
     lines.append(f"")
@@ -389,15 +397,20 @@ def generate_playbook(blueprint: str = "wholesale", market: str = "knoxville",
     # CLI reference
     lines.append(f"## Quick CLI Reference")
     lines.append(f"")
+    example_county = matched_profile.county if matched_profile else market_name
+    example_address = (
+        f'123 Main St, {matched_profile.major_city}, {matched_profile.state}'
+        if matched_profile else '123 Main St'
+    )
     lines.append(f"```bash")
     lines.append(f"# Daily scrape")
-    lines.append(f"python src/main.py daily --counties Knox,Blount --upload-datasift")
+    lines.append(f"python src/main.py daily --counties {example_county} --upload-datasift")
     lines.append(f"")
     lines.append(f"# Lead qualification")
     lines.append(f"python src/main.py lead-manage --action qualify --csv-path output/latest.csv")
     lines.append(f"")
     lines.append(f"# Comp analysis")
-    lines.append(f'python src/main.py comp --address "123 Main St, Knoxville, TN 37918"')
+    lines.append(f'python src/main.py comp --address "{example_address}"')
     lines.append(f"")
     lines.append(f"# Deal analysis")
     lines.append(f'python src/main.py analyze-deal --address "123 Main St" --purchase-price 150000')

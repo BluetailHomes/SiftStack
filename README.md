@@ -77,13 +77,13 @@ cp .env.example .env
 # Edit .env with your API keys (see Configuration below)
 
 # Run your first scrape
-python src/main.py daily --counties Knox
+python src/main.py daily --counties Jackson
 
 # Or import a scanned PDF
-python src/main.py pdf-import --pdf-path ./tax_sale.pdf --pdf-county Knox
+python src/main.py pdf-import --pdf-path ./tax_sale.pdf --pdf-county Jackson
 
 # Or process courthouse photos
-python src/main.py photo-import --folder ./photos --photo-county Knox --photo-type probate
+python src/main.py photo-import --folder ./photos --photo-county Jackson --photo-type probate
 
 # Full automated pipeline (scrape + enrich + upload to DataSift + notify Slack)
 python src/main.py daily --upload-datasift --notify-slack
@@ -91,16 +91,17 @@ python src/main.py daily --upload-datasift --notify-slack
 
 ## Adapting to Your Market
 
-SiftStack is built for Knox/Blount County, TN but the architecture is market-agnostic. Use any county name — the pipeline accepts it and degrades gracefully if a county-specific API (like tax lookup) isn't available:
+SiftStack currently operates in 8 counties across 4 states — Jackson/Clay/Platte/Cass (MO), Bernalillo/Sandoval (NM), Oklahoma/Tulsa (OK), and Johnson (KS) — plus the original Knox/Blount (TN) market, kept dormant but functional. `src/config.py`'s `COUNTIES` registry is the single source of truth every module reads from (state, notice-site platform, assessor/court reference URLs, city/zip fallbacks) — add a market there first, then:
 
-1. **Saved Searches** — Edit `SAVED_SEARCHES` in `src/config.py` to match your county's notice site
-2. **Tax API** — The tax enricher (`src/tax_enricher.py`) queries your county's property tax API. Knox is built in; add yours alongside it
-3. **Notice Parser** — The regex patterns in `src/notice_parser.py` handle 7 notice types: foreclosure, tax sale, tax delinquent, probate, eviction, code violation, divorce
-4. **Photo Import** — Works with any courthouse terminal in any county — the OCR + LLM pipeline is county-independent
-5. **Dropbox Watch** — Create folders for your county (`/YourCounty/foreclosure/`, etc.) and the watcher picks them up automatically
-6. **DataSift Presets** — The 21 filter presets and 26 sequence templates are reusable across markets
+1. **Add a `CountyProfile`** to `COUNTIES` in `src/config.py` — state, notice platform, major city, zip prefixes, assessor/court URLs.
+2. **Saved Searches** — Add entries to `SAVED_SEARCHES` matching your county's notice site dropdown. Only works out of the box if the notice site runs the same ASP.NET WebForms platform this scraper automates (verify via TLS cert SAN inspection, like the MO/NM sites — see CLAUDE.md's "Markets & Data Sources" table); otherwise you're building new scraper automation, not just config.
+3. **Tax API** — The tax enricher (`src/tax_enricher.py`) queries your county's property tax API. Knox is the only one built in (dormant/legacy) — none of the 8 active counties have a documented public API; the pipeline skips tax enrichment gracefully rather than guessing.
+4. **Notice Parser** — The regex patterns in `src/notice_parser.py` handle 7 notice types (foreclosure, tax sale, tax delinquent, probate, eviction, code violation, divorce) and derive state/city fallbacks from the `COUNTIES` registry — no per-market edits needed there once your county is in `COUNTIES`.
+5. **Photo Import** — Works with any courthouse terminal in any county — the OCR + LLM pipeline is county-independent.
+6. **Dropbox Watch** — Create folders for your county (`/YourCounty/foreclosure/`, etc.) and the watcher picks them up automatically.
+7. **DataSift Presets** — The 21 filter presets and 26 sequence templates are reusable across markets.
 
-The enrichment pipeline (Smarty, Zillow, obituary search, skip trace) works nationwide — no market-specific configuration needed.
+The enrichment pipeline (Smarty, Zillow, obituary search, skip trace) works nationwide — no market-specific configuration needed beyond adding the county to `COUNTIES`.
 
 ## Buy Box Configuration
 
@@ -144,7 +145,7 @@ These apply to every scheduled run.
 ### Required (for web scraping)
 | Variable | Service | Cost |
 |----------|---------|------|
-| `TNPN_EMAIL` / `TNPN_PASSWORD` | Your state's public notice site | Free account |
+| `NOTICE_SITE_EMAIL` / `NOTICE_SITE_PASSWORD` | Your state's public notice site (see `COUNTIES` in `src/config.py`) | Free account |
 | `CAPTCHA_API_KEY` | [2Captcha](https://2captcha.com) | ~$3/1,000 solves |
 
 ### Enrichment APIs (optional, pipeline degrades gracefully)
@@ -176,8 +177,8 @@ Every API is optional. Missing a key? That enrichment step is skipped and the pi
 # ── Data Acquisition ────────────────────────────────────────────
 python src/main.py daily                    # Scrape new notices since last run
 python src/main.py historical               # Scrape last 12 months
-python src/main.py pdf-import --pdf-path FILE --pdf-county Knox
-python src/main.py photo-import --folder DIR --photo-county Knox --photo-type probate
+python src/main.py pdf-import --pdf-path FILE --pdf-county Jackson
+python src/main.py photo-import --folder DIR --photo-county Jackson --photo-type probate
 python src/main.py dropbox-watch            # Auto-poll Dropbox for new photos
 python src/main.py csv-import --csv-path FILE
 
@@ -185,8 +186,8 @@ python src/main.py csv-import --csv-path FILE
 python src/main.py comp --address "123 Main St"
 python src/main.py rehab --address "123 Main St" --tier 2
 python src/main.py analyze-deal --address "123 Main St" --purchase-price 150000
-python src/main.py market-analysis --counties Knox
-python src/main.py buyer-prospect --counties Knox
+python src/main.py market-analysis --counties Jackson
+python src/main.py buyer-prospect --counties Jackson
 python src/main.py deep-prospect --csv-path output/records.csv --depth 3
 
 # ── CRM Operations ─────────────────────────────────────────────
@@ -198,7 +199,7 @@ python src/main.py lead-manage --lead-action qualify
 # ── Workflow Tools ──────────────────────────────────────────────
 python src/main.py setup-sequences --dry-run
 python src/main.py niche-sequential --channel sms --day 1
-python src/main.py playbook --blueprint wholesale --market knoxville
+python src/main.py playbook --blueprint wholesale --market "kansas-city"
 ```
 
 ### Common Flags
@@ -287,7 +288,7 @@ src/
 
 ## API Cost Estimates
 
-Running daily in one county (Knox, TN — ~20-40 new notices/day):
+Running daily in one county (~20-40 new notices/day, e.g. Jackson County, MO):
 
 | Service | Monthly Cost | What It Does |
 |---------|-------------|-------------|

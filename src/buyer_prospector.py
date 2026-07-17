@@ -15,7 +15,7 @@ Data sources:
   - Skip trace (existing tracerfy_skip_tracer.py)
 
 Usage:
-  python src/main.py buyer-prospect --counties Knox,Blount --months-back 18
+  python src/main.py buyer-prospect --counties Jackson,Clay --months-back 18
 """
 
 import csv
@@ -368,7 +368,7 @@ def generate_buyer_report(report: BuyerReport, output_path: str = "") -> str:
 
 # ── CSV export for DataSift ───────────────────────────────────────────
 
-def export_buyers_csv(investors: list[InvestorProfile], output_path: str = "") -> str:
+def export_buyers_csv(investors: list[InvestorProfile], output_path: str = "", state: str = "") -> str:
     """Export top buyers as DataSift-ready CSV."""
     if not output_path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -383,7 +383,7 @@ def export_buyers_csv(investors: list[InvestorProfile], output_path: str = "") -
                 "owner_name": inv.person_behind or inv.name,
                 "address": "",
                 "city": "",
-                "state": "TN",
+                "state": state,
                 "zip": inv.primary_zip,
                 "tags": f"buyer,{inv.buyer_type},buyer_score_{round(inv.score)}",
                 "lists": "Cash Buyers",
@@ -405,8 +405,12 @@ def run_buyer_prospecting(counties: list[str] | None = None,
 
     Returns dict with report and output paths.
     """
-    counties = counties or ["Knox", "Blount"]
+    counties = counties or [p.county for p in config.COUNTIES.values() if p.active]
     county_str = ", ".join(counties)
+    # Best-effort single state for the CSV export's "state" column — if the
+    # batch spans multiple states, leave blank rather than guessing wrong.
+    counties_states = {config.state_for_county(c) for c in counties if config.state_for_county(c)}
+    batch_state = counties_states.pop() if len(counties_states) == 1 else ""
     logger.info("Starting buyer prospecting for: %s (last %d months)", county_str, months_back)
 
     # Load transaction data
@@ -436,7 +440,7 @@ def run_buyer_prospecting(counties: list[str] | None = None,
 
     # Generate reports
     report_path = generate_buyer_report(report, output_path)
-    csv_path = export_buyers_csv(scored)
+    csv_path = export_buyers_csv(scored, state=batch_state)
 
     logger.info("Buyer prospecting complete: %d investors, %s",
                 len(scored), ", ".join(f"{t}: {c}" for t, c in by_type.items()))

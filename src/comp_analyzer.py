@@ -46,12 +46,34 @@ TARGET_COMPS = 5
 MAX_COMPS = 7
 
 # ── Adjustment values (Knoxville regional calibration) ────────────────
-# These are per-unit adjustment amounts used when a comp differs from subject
+# These are per-unit adjustment amounts used when a comp differs from subject.
+# Not re-calibrated for the OK/MO/KS/NM markets yet — same caveat as
+# rehab_estimator.py's REGIONAL_MULTIPLIERS.
 ADJ_PER_SQFT = 85.0            # $ per sqft difference
 ADJ_PER_BEDROOM = 5000.0       # $ per bedroom difference
 ADJ_PER_BATHROOM = 7500.0      # $ per bathroom difference
 ADJ_PER_YEAR_BUILT = 500.0     # $ per year of age difference
 ADJ_PER_LOT_SQFT = 2.0         # $ per sqft of lot size difference
+
+# ── Sale-price disclosure status by state ──────────────────────────────
+# Verified via SoldFast/RETipster non-disclosure-state research (2026):
+# non-disclosure states withhold sale price from public deed records, so
+# comps must be sourced from MLS/Zillow rather than county recorder data.
+# Missouri is a notable mixed case: Jackson County (one of our own active
+# counties) DOES disclose sale prices; Clay/Platte/Cass do not.
+NON_DISCLOSURE_STATES = {"KS", "MO", "NM"}
+DISCLOSING_MO_COUNTIES = {"jackson"}  # exception within a non-disclosure state
+
+
+def _disclosure_note(state: str, county: str = "") -> str:
+    """Human-readable disclosure-status note for report footers."""
+    if state == "MO" and county.strip().lower() in DISCLOSING_MO_COUNTIES:
+        return f"{county} County, MO discloses sale prices in public deed records."
+    if state in NON_DISCLOSURE_STATES:
+        state_full = config.STATE_NAMES.get(state, state)
+        return f"{state_full} is a non-disclosure state. All data sourced via Zillow/MLS."
+    state_full = config.STATE_NAMES.get(state, state) or "This market"
+    return f"{state_full} sale price data may be available via public deed records as well as Zillow/MLS."
 ADJ_LOT_MAX = 15000.0          # Cap on lot size adjustment
 ADJ_PER_GARAGE = 8000.0        # $ per garage stall difference
 # Market condition adjustment: % per month of age (appreciating market)
@@ -275,7 +297,7 @@ def fetch_comparable_sales(subject: SubjectProperty, radius_miles: float = DEFAU
         comp = CompProperty(
             address=item.get("streetAddress") or item.get("address") or "",
             city=item.get("city") or "",
-            state=item.get("state") or "TN",
+            state=item.get("state") or subject.state,
             zip_code=str(item.get("zipcode") or item.get("zip") or ""),
             latitude=lat,
             longitude=lon,
@@ -812,7 +834,7 @@ def generate_comp_report(subject: SubjectProperty, comps: list[CompProperty],
     ws6.cell(row=3, column=1, value="Methodology").font = _SUBTITLE_FONT
     ws6.cell(row=4, column=1, value="Bucket A (Non-Disclosure): 30% weight — Off-market/FSBO sales with limited price transparency").font = _LABEL_FONT
     ws6.cell(row=5, column=1, value="Bucket B (Disclosure/MLS): 70% weight — Agent-listed sales with confirmed pricing").font = _LABEL_FONT
-    ws6.cell(row=6, column=1, value="Tennessee is a non-disclosure state. All data sourced via Zillow/MLS.").font = _LABEL_FONT
+    ws6.cell(row=6, column=1, value=_disclosure_note(subject.state)).font = _LABEL_FONT
 
     ws6.cell(row=8, column=1, value="Bucket A Comps").font = _SUBTITLE_FONT
     bucket_a = [c for c in comps[:MAX_COMPS] if c.bucket == "A"]
@@ -876,7 +898,7 @@ def generate_comp_report(subject: SubjectProperty, comps: list[CompProperty],
         "A conservative ARV that comes in low leaves room for upside.",
         "",
         f"Report generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        f"Region: Knoxville / East Tennessee",
+        f"Region: {subject.city}, {subject.state}" if subject.city else f"Region: {subject.state}",
     ]
     for i, note in enumerate(notes, 3):
         ws7.cell(row=i, column=1, value=note).font = _LABEL_FONT

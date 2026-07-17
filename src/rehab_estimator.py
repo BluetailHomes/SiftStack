@@ -1,11 +1,13 @@
 """Room-by-room rehab cost estimation with 4-tier finish system.
 
 Generates full rehab budgets, wholetail comparisons, and project timelines.
-Regional pricing calibrated for Knoxville / East Tennessee market.
+Regional pricing multipliers below are researched for the original Knoxville
+market; the 8 active OK/MO/KS/NM counties don't have researched multipliers
+yet and default to 1.00 (national average) — see REGIONAL_MULTIPLIERS.
 
 Usage:
-  python src/main.py rehab --address "123 Main St, Knoxville, TN 37918"
-  python src/main.py rehab --address "123 Main St" --tier 2 --scope full --region knoxville
+  python src/main.py rehab --address "123 Main St, Kansas City, MO 64105"
+  python src/main.py rehab --address "123 Main St" --tier 2 --scope full --region kansas_city
 """
 
 import logging
@@ -20,15 +22,24 @@ import config
 logger = logging.getLogger(__name__)
 
 # ── Regional multipliers ──────────────────────────────────────────────
-# Knoxville labor/materials costs relative to national average (1.0)
+# Labor/materials costs relative to national average (1.0). Knoxville/Blount/
+# Nashville/Chattanooga are researched (original TN market, now dormant).
+# The active OK/MO/KS/NM metros below default to 1.00 (uncalibrated —
+# no regional research done yet, flag for follow-up before trusting a rehab
+# estimate in these markets more than roughly).
 REGIONAL_MULTIPLIERS = {
     "knoxville": 0.88,      # ~12% below national average
     "blount": 0.86,          # Slightly lower than Knox
     "national": 1.00,
     "nashville": 0.95,
     "chattanooga": 0.90,
+    "oklahoma_city": 1.00,   # uncalibrated
+    "tulsa": 1.00,           # uncalibrated
+    "kansas_city": 1.00,     # uncalibrated — covers Jackson/Clay/Platte/Cass metro
+    "johnson_county_ks": 1.00,  # uncalibrated
+    "albuquerque": 1.00,     # uncalibrated
 }
-DEFAULT_REGION = "knoxville"
+DEFAULT_REGION = "national"
 
 # ── 4-Tier Finish System ─────────────────────────────────────────────
 # Cost per sqft by tier (national average, before regional multiplier)

@@ -6,15 +6,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **SiftStack** — Full-stack real estate investing operations platform built around DataSift.ai CRM. Covers the entire REI business lifecycle:
 
-1. **Data Acquisition:** Web scraping tnpublicnotice.com (foreclosures, tax sales, probates), scanned PDF import, courthouse terminal photo import (probate, eviction, code violations, divorce), Dropbox auto-polling
-2. **Enrichment Pipeline:** 10+ steps — Smarty address standardization, Zillow property data, Knox County Tax API, obituary/heir research, Ancestry.com SSDI, Tracerfy skip trace, Trestle phone scoring, entity research
+1. **Data Acquisition:** Web scraping public-notice sites (foreclosures, tax sales, probates — see "Markets & Data Sources" below), scanned PDF import, courthouse terminal photo import (probate, eviction, code violations, divorce), Dropbox auto-polling
+2. **Enrichment Pipeline:** 10+ steps — Smarty address standardization, Zillow property data, county tax APIs (Knox County only — see below), obituary/heir research, Ancestry.com SSDI, Tracerfy skip trace, Trestle phone scoring, entity research
 3. **Deal Analysis:** Comparable sales (Two-Bucket ARV), rehab estimation (4-tier room-by-room), deal analyzer (MAO/ROI/financing scenarios)
 4. **Market Intelligence:** Zip code scoring, Market Finder reports, cash buyer list building, investor portfolio analysis
 5. **CRM Automation:** DataSift upload, 26 TCA sequence templates, 12 niche sequential marketing presets, filter preset management, SiftMap sold property tagging
 6. **Lead Management:** 4 Pillars of Motivation auto-qualification, STABM daily routine, pipeline reporting, deep prospecting (4-level framework)
 7. **Operations:** Acquisition playbook generator (SOPs, scripts, checklists), Slack/Discord notifications, Google Drive upload, Apify Actor deployment
 
-Currently focused on Knox and Blount counties, Tennessee.
+**Markets & Data Sources.** Bluetail's active markets span 8 counties across 4 states. Every module keys off the `COUNTIES` registry in `src/config.py` — see that file for the full per-county data (state, notice platform, assessor/court URLs, zip prefixes). Summary:
+
+| County | State | Notice site | Scraper status |
+|---|---|---|---|
+| Jackson, Clay, Platte, Cass | MO | mopublicnotices.com | **Live** — verified working |
+| Bernalillo, Sandoval | NM | newmexicopublicnotices.com | Config-ready, not yet live — same ASP.NET WebForms vendor as the original TN build (verified via shared `lrsws.co` TLS cert), but saved searches must be created in the site UI and credentials obtained first |
+| Oklahoma, Tulsa | OK | oklahomanotices.com (backend: opa.eclipping.org) | **Not scraper-compatible** — different vendor platform (eclipping), needs dedicated scraper development |
+| Johnson | KS | kansaspublicnotices.com | **Not scraper-compatible** — different vendor platform ("NewzGroup" family, shared cert with kypublicnotice.com/ndpublicnotices.com), needs dedicated scraper development |
+| Knox, Blount | TN | tnpublicnotice.com | Dormant/legacy — the original build market, kept functional but excluded from default active scraping |
+
+None of the 8 active counties have a documented public tax-assessor API like Knox County's — `tax_enricher.py`/`property_lookup.py` degrade gracefully (skip enrichment, log rather than mislabel) for counties without a working integration. Jackson County (MO) and Bernalillo County (NM) have ArcGIS Open Data Hub parcel layers, the closest thing to a real API among the 8 — not yet wired up. See each `CountyProfile.assessor_url`/`court_records_url` in `config.py` for reference-only links (courthouse/court-record and tax-assessor sites), and each profile's `notes` field for known caveats (e.g. probate notice coverage on the MO/NM sites hasn't been confirmed live yet).
 
 8. **REI Skill Library:** 13 Claude Co-Work skill files (`.skill`/`.plugin` ZIPs) for distribution to DataSift community via [learn.datasift.ai/claude-skills-rei](https://learn.datasift.ai/claude-skills-rei). Skills teach Claude specific REI workflows when uploaded to Co-Work sessions or Projects.
 
@@ -30,7 +40,7 @@ cp .env.example .env  # then fill in credentials
 python src/main.py daily                          # new notices since last run
 python src/main.py historical                     # last 12 months of data
 python src/main.py daily --split                  # separate CSV per county+type
-python src/main.py daily --counties Knox          # only Knox county
+python src/main.py daily --counties Jackson       # only Jackson county
 python src/main.py daily --types foreclosure,probate  # only specific types
 python src/main.py daily -v                       # verbose/debug logging
 
@@ -42,11 +52,11 @@ python src/main.py manage-presets --all                           # discovery + 
 
 # SiftMap sold property tagging
 python src/main.py manage-sold --months-back 12                   # tag sold properties (last 12 months)
-python src/main.py manage-sold --counties Knox --min-sale-price 5000
+python src/main.py manage-sold --counties Jackson --min-sale-price 5000
 
 # Courthouse photo import (build 1.0.28+)
-python src/main.py photo-import --folder ./photos --photo-county Knox --photo-type probate
-python src/main.py photo-import --folder ./photos --photo-county Knox --photo-type eviction --skip-obituary
+python src/main.py photo-import --folder ./photos --photo-county Jackson --photo-type probate
+python src/main.py photo-import --folder ./photos --photo-county Jackson --photo-type eviction --skip-obituary
 python src/main.py dropbox-watch                                  # auto-poll Dropbox for new photos
 python src/main.py dropbox-watch --poll-interval 300 --max-polls 5  # 5-min interval, 5 cycles
 python src/main.py dropbox-watch --no-delete                      # keep photos in Dropbox after processing
@@ -80,14 +90,13 @@ All source files are in `src/` and imports assume `src/` is the working director
 
 ## Site-Specific Details
 
-The site is **ASP.NET WebForms** — all navigation uses `__doPostBack()` with ViewState. Session IDs are embedded in URL paths (`/(S({guid}))/`). Playwright is required because direct HTTP requests would need to manage ViewState/EventValidation manually.
+The current scraper automation (`scraper.py`) targets the **ASP.NET WebForms** notice-site platform — all navigation uses `__doPostBack()` with ViewState. Session IDs are embedded in URL paths (`/(S({guid}))/`). Playwright is required because direct HTTP requests would need to manage ViewState/EventValidation manually. This is mopublicnotices.com (live, Missouri counties) and newmexicopublicnotices.com (config-ready, same vendor per the "Markets & Data Sources" table above — confirmed via TLS cert SAN, not yet turned on). Oklahoma's and Kansas's notice sites run on different vendor platforms and are **not compatible** with this automation as-is.
 
 **reCAPTCHA v2 is required on every single notice detail page**, even when logged in. There is no CAPTCHA on login, search, or results pages. The sitekey is hardcoded in `config.py`.
 
 ## Saved Searches
 
-8 searches defined in `config.py` as `SAVED_SEARCHES`. Each maps to an exact dropdown option name on the Smart Search dashboard:
-- Knox & Blount × (Foreclosure V2, Tax Sale V2, Tax Delinquent V2, Probate V2)
+Defined in `config.py` as `SAVED_SEARCHES`, built from the `COUNTIES` registry. Each entry maps to an exact dropdown option name that must exist on the Smart Search dashboard before scraping — currently only the 4 live Missouri counties (Jackson, Clay, Platte, Cass) have real saved searches configured (probate). New Mexico's saved searches still need to be created in the newmexicopublicnotices.com UI before that market goes live; Oklahoma/Kansas aren't in `SAVED_SEARCHES` at all yet since the platform isn't scraper-compatible. Knox/Blount (TN) saved searches remain defined but inactive (dormant market).
 
 Filterable via `--counties` and `--types` CLI args (comma-separated, or omit for all).
 
@@ -141,7 +150,7 @@ apify push
 
 ## Courthouse Photo Pipeline (build 1.0.28+)
 
-Courthouse terminal photos → OCR → LLM parse → enrichment → DataSift. Runner takes phone photos at Knox/Blount county terminals, uploads to Dropbox organized as `{county}/{notice_type}/`, system auto-processes.
+Courthouse terminal photos → OCR → LLM parse → enrichment → DataSift. Runner takes phone photos at county terminals, uploads to Dropbox organized as `{county}/{notice_type}/`, system auto-processes. `dropbox_watcher.py` already resolves county/notice_type generically from the folder path (not restricted to Knox/Blount — see its module docstring), so the photo-import mechanics work for any of the 8 active counties. **The Probate Deep Prospecting property-address lookup below is currently Knox-only** (built on the Knox Tax API, which has no equivalent free tier for the other counties) — for any other county, that lookup is skipped gracefully rather than guessing.
 
 ### Notice Types (7 total)
 - `foreclosure`, `tax_sale`, `tax_delinquent`, `probate` — existing from web scraper
@@ -157,9 +166,9 @@ Courthouse terminal photos → OCR → LLM parse → enrichment → DataSift. Ru
 - **PSM 4** (single column variable text) for terminal screens — NOT PSM 6 (single uniform block) which was the research recommendation but fails in practice
 - **Do NOT use `fix_rotation()` (Tesseract OSD) on phone photos** — EXIF transpose handles rotation. OSD on raw phone images often fails and the 270° fallback rotates correct images sideways
 
-### Probate Deep Prospecting (from courthouse terminals)
+### Probate Deep Prospecting (from courthouse terminals) — Knox County only
 
-Courthouse probate records have decedent name + PR/executor name but NO property address. Multi-tier lookup fills the gap:
+Courthouse probate records have decedent name + PR/executor name but NO property address. Multi-tier lookup fills the gap. **This entire lookup is scoped to Knox County** (`enrichment_pipeline.py` filters to `county.lower() == "knox"` before calling it) — none of the 8 active OK/MO/KS/NM counties have an equivalent free tax-API tier, so this doesn't run for them yet. See `config.COUNTIES[county].assessor_url` for each county's reference-only assessor site.
 
 **Property Address Lookup** (Step 3c in enrichment pipeline):
 1. **Tier 1: Knox Tax API name search** — search `/parcels/{decedent_name}`, score by token overlap (FIRST MIDDLE LAST → LAST FIRST MIDDLE), accept >= 0.4 match. Tries multiple name variations (with/without suffix, LAST FIRST format, first+last only).
@@ -177,16 +186,26 @@ Courthouse probate records have decedent name + PR/executor name but NO property
 - Applied to both full-page and snippet matches
 
 ### Dropbox Folder Structure
+
+`{county}` matches any county name in `config.COUNTIES` (not restricted to Knox/Blount) — the pattern below shows the 4 live Missouri counties as an example alongside the dormant original market:
 ```
 {DROPBOX_ROOT_FOLDER}/
-├── Knox/
+├── Jackson/
 │   ├── eviction/
 │   ├── code_violation/
 │   ├── divorce/
 │   ├── foreclosure/
 │   ├── tax_sale/
 │   └── probate/
-└── Blount/
+├── Clay/
+│   └── (same subfolders)
+├── Platte/
+│   └── (same subfolders)
+├── Cass/
+│   └── (same subfolders)
+├── Knox/                    (dormant/legacy market)
+│   └── (same subfolders)
+└── Blount/                  (dormant/legacy market)
     └── (same subfolders)
 ```
 
@@ -195,7 +214,7 @@ Courthouse probate records have decedent name + PR/executor name but NO property
 - `DROPBOX_APP_SECRET` — Dropbox OAuth2 app secret
 - `DROPBOX_REFRESH_TOKEN` — Dropbox offline refresh token (auto-rotates access tokens)
 - `DROPBOX_POLL_INTERVAL` — seconds between polls (default 900 = 15 min)
-- `DROPBOX_ROOT_FOLDER` — root folder path in Dropbox (e.g., "TN Public Notice")
+- `DROPBOX_ROOT_FOLDER` — root folder path in Dropbox (e.g., "Bluetail Courthouse Photos")
 
 ### Dependencies (added to requirements.txt)
 - `opencv-python-headless>=4.13.0` — image preprocessing (headless = no GUI, saves 26MB in Docker)
@@ -239,7 +258,7 @@ DataSift's niche sequential system uses filter presets to guide records through 
 - Only core address fields (Property Street, City, State, ZIP) reliably auto-map
 - Tags, Lists, Estimated Value, and enrichment columns often stay unmapped in step 4
 - Notes and MSL Status sometimes auto-map
-- Custom fields (TN Public Notice group) require drag-and-drop mapping
+- Custom fields (the "TN Public Notice" custom-field group in your live DataSift account) require drag-and-drop mapping — this is a group name configured in the DataSift UI itself, not something this codebase sets; rename it in your DataSift account if you want it to reflect the current markets
 
 ### Contact Logic
 - **Deceased owners:** Contact = decision maker (first/last name + mailing address from DM)
@@ -323,7 +342,7 @@ Hard-won patterns from build 1.0.22-1.0.23 (SiftMap, preset management, sequence
 - "Sold Property Cleanup" sequence exists in Transactions folder (build 1.0.23): Trigger (Property Tags Added) → Condition (Sold) → Actions (Status→Sold, Remove Lists, Clear Tasks, Clear Assignee)
 
 **SiftMap Automation**
-- Search by city (NOT county): Knox → "Knoxville, TN", Blount → "Maryville, TN"
+- Search by county-level FIPS code via direct URL (`?location={json}` with `searchType: "county"`, county name, state, and FIPS code) — far more reliable than interacting with the search UI. FIPS codes for all 8 active counties + Knox/Blount are in `datasift_uploader.py`'s `COUNTY_FIPS` dict, sourced from the FCC's authoritative state+county FIPS reference. State/title are derived from `config.state_for_county()`, not hardcoded to TN.
 - PropertyDetails panel auto-opens on search — remove from DOM before other interactions
 - "Add Records to Account" modal: toggle OFF "Do not replace owners", add tags, dismiss dropdown by clicking heading (NOT Escape — clears tags)
 - Known limitation: SiftMap filters (price, date) set values visually but don't trigger React re-query. Only sidebar-visible properties (~3-5) get added per run
@@ -342,8 +361,8 @@ Hard-won patterns from building `extract_market_finder.py`. The Market Finder UI
 
 ```bash
 # Extract all Market Finder data for a county
-python src/extract_market_finder.py --state "Tennessee" --county "Knox" -v
-python src/extract_market_finder.py --state "Tennessee" --county "Knox,Blount" --headless
+python src/extract_market_finder.py --state "Missouri" --county "Jackson" -v
+python src/extract_market_finder.py --state "Missouri" --county "Jackson,Clay" --headless
 
 # Output: JSON file in output/market_finder_{state}_{county}_{timestamp}.json
 ```

@@ -4,7 +4,7 @@ Calculates MAO (Maximum Allowable Offer), ROI projections, holding costs,
 selling costs, and financing scenarios for flip/wholesale/hold strategies.
 
 Usage:
-  python src/main.py analyze-deal --address "123 Main St, Knoxville, TN 37918"
+  python src/main.py analyze-deal --address "123 Main St, Kansas City, MO 64105"
   python src/main.py analyze-deal --address "123 Main St" --purchase-price 150000 --rehab-tier 2
 """
 
@@ -37,7 +37,22 @@ DEFAULT_INSURANCE_MONTHLY = 150.0
 DEFAULT_UTILITIES_MONTHLY = 200.0
 DEFAULT_AGENT_COMMISSION = 0.06    # 6% (3% buyer + 3% seller)
 DEFAULT_CLOSING_COSTS_PCT = 0.025  # 2.5% of sale price
-DEFAULT_TRANSFER_TAX_PCT = 0.0037  # TN transfer tax: $0.37 per $100
+
+# State-level real estate transfer tax rates. Verified (2026): MO, KS, and NM
+# have NO state-level transfer tax (all three explicitly confirmed via
+# state tax authority / real estate transfer tax references). OK charges a
+# documentary stamp tax of $0.75 per $500 (0.15%), confirmed via the
+# Oklahoma Tax Commission's Documentary Stamp Tax guide. TN is the original
+# 0.37% figure this pipeline was built with. Local/county transfer taxes may
+# still apply on top of these state-level rates in any state.
+TRANSFER_TAX_PCT_BY_STATE = {
+    "TN": 0.0037,
+    "MO": 0.0,
+    "KS": 0.0,
+    "NM": 0.0,
+    "OK": 0.0015,
+}
+DEFAULT_TRANSFER_TAX_PCT = TRANSFER_TAX_PCT_BY_STATE["TN"]  # fallback when state is unknown
 DEFAULT_WHOLESALE_FEE = 10000.0
 DEFAULT_FLIP_RULE = 0.75           # 75% Rule: MAO = ARV × 0.75 - rehab
 DEFAULT_WHOLESALE_RULE = 0.70      # 70% Rule for wholesale
@@ -165,7 +180,11 @@ def _calc_monthly_payment(principal: float, annual_rate: float, months: int) -> 
 
 
 def _estimate_monthly_rent(arv: float, sqft: int, bedrooms: int) -> float:
-    """Estimate monthly rent based on 1% rule and property characteristics."""
+    """Estimate monthly rent based on 1% rule and property characteristics.
+
+    Calibrated for the original Knoxville market — not re-researched for the
+    OK/MO/KS/NM markets yet (same caveat as REGIONAL_MULTIPLIERS).
+    """
     # 1% rule as baseline (conservative for Knoxville)
     rent_pct_rule = arv * 0.008  # 0.8% for Knoxville (below 1% rule)
     # Sqft-based estimate
@@ -214,11 +233,12 @@ def calculate_holding_costs(purchase_price: float, rehab_months: float,
     )
 
 
-def calculate_selling_costs(sale_price: float) -> SellingCosts:
+def calculate_selling_costs(sale_price: float, state: str = "") -> SellingCosts:
     """Calculate costs to sell the property."""
+    transfer_tax_pct = TRANSFER_TAX_PCT_BY_STATE.get(state, DEFAULT_TRANSFER_TAX_PCT)
     commission = sale_price * DEFAULT_AGENT_COMMISSION
     closing = sale_price * DEFAULT_CLOSING_COSTS_PCT
-    transfer = sale_price * DEFAULT_TRANSFER_TAX_PCT
+    transfer = sale_price * transfer_tax_pct
 
     return SellingCosts(
         agent_commission=round(commission),
@@ -723,7 +743,7 @@ def run_deal_analysis(address: str, city: str = "", state: str = "TN",
     # Step 5: Projections
     rehab_months = rehab_full.total_weeks / 4.0  # weeks to months
     holding = calculate_holding_costs(purchase_price, rehab_months)
-    selling = calculate_selling_costs(arv.arv_mid)
+    selling = calculate_selling_costs(arv.arv_mid, state=state)
 
     flip = calculate_flip(arv.arv_mid, purchase_price, rehab_full.grand_total,
                           holding, selling, rehab_months)

@@ -98,6 +98,15 @@ def _filter_vacant_land(notices: list[NoticeData]) -> list[NoticeData]:
 
     Vacant land parcels (e.g., "0 Andersonville Pike", "0000 Old Rd",
     or just "Andersonville Pike") are not actionable for marketing.
+
+    Probate notices are exempt: the source notice text never contains a
+    property address (that's what Step 3c's Probate Property Lookup exists
+    to find, and it runs AFTER this filter) — an empty n.address on a fresh
+    probate record means "not looked up yet", not "vacant land". Filtering
+    them here would silently kill every probate lead before Step 3c ever
+    got a chance to run (confirmed live 2026-07-16 against a real Jackson
+    County MO probate notice — this was dropping 100% of probate records
+    regardless of market, not just the new counties).
     """
 
     def _has_house_number(addr: str) -> bool:
@@ -110,7 +119,10 @@ def _filter_vacant_land(notices: list[NoticeData]) -> list[NoticeData]:
         return int(m.group(1)) > 0
 
     before = len(notices)
-    result = [n for n in notices if _has_house_number(n.address)]
+    result = [
+        n for n in notices
+        if n.notice_type == "probate" or _has_house_number(n.address)
+    ]
     removed = before - len(result)
     if removed:
         logger.info("  Removed %d vacant land records (no house number)", removed)
@@ -174,12 +186,22 @@ def _filter_commercial(notices: list[NoticeData]) -> list[NoticeData]:
 
 
 def _compute_mailable(notices: list[NoticeData]) -> None:
-    """Set mailable flag: 'yes' if address + city + zip all present."""
+    """Set mailable flag: 'yes' if a real mailing address is present.
+
+    For probate notices, the property address is frequently unknown (see
+    _filter_vacant_land) but the record is still mailable via the PR/
+    executor's own address, which notice_parser already extracts into
+    owner_street/owner_city/owner_zip from the notice text itself. Property
+    address (address/city/zip) is checked first since it's more complete
+    when present; the PR address is the fallback for probate specifically.
+    """
     for n in notices:
-        if n.address.strip() and n.city.strip() and n.zip.strip():
-            n.mailable = "yes"
-        else:
-            n.mailable = ""
+        has_property_addr = bool(n.address.strip() and n.city.strip() and n.zip.strip())
+        has_pr_addr = bool(
+            n.notice_type == "probate"
+            and n.owner_street.strip() and n.owner_city.strip() and n.owner_zip.strip()
+        )
+        n.mailable = "yes" if (has_property_addr or has_pr_addr) else ""
 
 
 # ── Run ID ───────────────────────────────────────────────────────────
@@ -203,7 +225,11 @@ def _validate_records(notices: list[NoticeData]) -> list[NoticeData]:
     """Validate records before export. Removes invalid records and logs issues.
 
     Checks:
-      - address, city, zip must be non-empty
+      - address, city, zip must be non-empty (property address for most
+        notice types; for probate, the PR/executor's mailing address —
+        owner_street/owner_city/owner_zip — satisfies this instead, since
+        the property address is frequently never found, same reasoning as
+        _filter_vacant_land and _compute_mailable above)
       - address must contain at least one letter (not pure garbage OCR)
       - date fields must be valid YYYY-MM-DD format if present
     """
@@ -213,17 +239,32 @@ def _validate_records(notices: list[NoticeData]) -> list[NoticeData]:
     for n in notices:
         issues = []
 
-        # Required fields
-        if not n.address.strip():
-            issues.append("missing address")
-        elif _GARBAGE_RE.match(n.address):
-            issues.append(f"garbage address: {n.address!r}")
+        if n.notice_type == "probate" and not n.address.strip():
+            # No property address — fall back to validating the PR's
+            # mailing address instead of demanding a property address
+            # that's frequently never located.
+            if not n.owner_street.strip():
+                issues.append("missing address (no property or PR address)")
+            elif _GARBAGE_RE.match(n.owner_street):
+                issues.append(f"garbage PR address: {n.owner_street!r}")
 
-        if not n.city.strip():
-            issues.append("missing city")
+            if not n.owner_city.strip():
+                issues.append("missing city (no property or PR city)")
 
-        if not n.zip.strip():
-            issues.append("missing zip")
+            if not n.owner_zip.strip():
+                issues.append("missing zip (no property or PR zip)")
+        else:
+            # Required fields
+            if not n.address.strip():
+                issues.append("missing address")
+            elif _GARBAGE_RE.match(n.address):
+                issues.append(f"garbage address: {n.address!r}")
+
+            if not n.city.strip():
+                issues.append("missing city")
+
+            if not n.zip.strip():
+                issues.append("missing zip")
 
         # Date format validation (only if populated)
         for date_field in ("date_added", "auction_date"):

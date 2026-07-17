@@ -4,8 +4,13 @@ For probate notices, the notice text contains the PR's mailing address but NOT
 the decedent's property address. This module searches county property assessor
 databases by the decedent's name to find their property address(es).
 
-- Knox County: KGIS Maps (Playwright scrape — ArcGIS REST services require auth)
-- Blount County: TPAD (TN Comptroller) — simple HTTP GET, HTML table parsing
+- Knox County (TN): KGIS Maps (Playwright scrape — ArcGIS REST services require auth)
+- Blount County (TN): TPAD (TN Comptroller) — simple HTTP GET, HTML table parsing
+
+Both are dormant/legacy market integrations. None of the 8 active OK/MO/KS/NM
+counties have an equivalent scraper yet — see config.COUNTIES for each
+county's assessor_url (reference only). lookup_decedent_properties() already
+degrades gracefully for those counties (logs + skips rather than guessing).
 """
 
 import asyncio

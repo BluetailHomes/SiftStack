@@ -6,11 +6,11 @@ Scores each zip by distress density, property values, equity, and competition.
 Data sources:
   - Our own scraped notice data (aggregated by zip)
   - Zillow API (property values via OpenWeb Ninja)
-  - Knox County Tax API (delinquency density)
+  - Knox County Tax API (delinquency density — Knox only, dormant/legacy market)
 
 Usage:
-  python src/main.py market-analysis --counties Knox,Blount
-  python src/main.py market-analysis --counties Knox --zip-codes 37918,37919,37920
+  python src/main.py market-analysis --counties Jackson,Clay
+  python src/main.py market-analysis --counties Jackson --zip-codes 64105,64106,64108
 """
 
 import csv
@@ -32,7 +32,12 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# ── Knox/Blount county zip codes ──────────────────────────────────────
+# ── Known exhaustive zip lists, for pre-seeding zip profiles before any ──
+# notices have been scraped. Only Knox/Blount (the original dormant/legacy
+# market) have a researched exhaustive list. The 8 active OK/MO/KS/NM
+# counties don't have one yet — COUNTY_ZIPS.get() already degrades
+# gracefully to an empty list for them (profiles get seeded from scraped
+# notice data instead, once scraping is live).
 KNOX_ZIPS = [
     "37901", "37902", "37909", "37912", "37914", "37915", "37916", "37917",
     "37918", "37919", "37920", "37921", "37922", "37923", "37924", "37931",
@@ -435,7 +440,7 @@ def run_market_analysis(counties: list[str] | None = None,
 
     Returns dict with report data and output path.
     """
-    counties = counties or ["Knox", "Blount"]
+    counties = counties or [p.county for p in config.COUNTIES.values() if p.active]
     county_str = ", ".join(counties)
     logger.info("Starting market analysis for: %s", county_str)
 

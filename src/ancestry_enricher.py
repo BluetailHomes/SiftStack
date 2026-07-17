@@ -290,7 +290,7 @@ async def _search_ssdi(page, first_name: str, last_name: str, state: str = "TN",
     if state:
         loc_el = await page.query_selector("#sfs__SelfResidencePlace")
         if loc_el and await loc_el.is_visible():
-            state_name = {"TN": "Tennessee", "AL": "Alabama"}.get(state, state)
+            state_name = cfg.STATE_NAMES.get(state, state)
             await loc_el.fill(state_name)
             await _delay(1, 2)
             # Wait for autocomplete dropdown and select first match
@@ -508,7 +508,7 @@ async def _search_obituaries(page, first_name: str, last_name: str, state: str =
     # Navigate directly to search results URL — bypasses SPA form issues
     # Category 34 = "Death, Burial, Cemetery & Obituaries"
     import urllib.parse
-    state_name = {"TN": "Tennessee", "AL": "Alabama"}.get(state, state)
+    state_name = cfg.STATE_NAMES.get(state, state)
     params = {
         "name": f"{first_name}_{last_name}",
         "birth": "",
@@ -640,8 +640,7 @@ async def _search_newspapers(page, first_name: str, last_name: str, state: str =
     # Build search URL with obituary category filter
     # Newspapers.com search URL format: /search/?query=FIRSTNAME+LASTNAME&t=4268
     # t=4268 = Obituaries category (from the category dropdown)
-    state_abbr_to_full = {"TN": "Tennessee", "AL": "Alabama"}
-    state_full = state_abbr_to_full.get(state, state)
+    state_full = cfg.STATE_NAMES.get(state, state)
 
     query_parts = [first_name, last_name]
     search_query = " ".join(query_parts)
@@ -1072,9 +1071,12 @@ def _location_matches(location: str, state: str = "TN", city: str = "") -> tuple
       - score: 0 = no location data, 1 = right state, 2 = right county/city
     """
     loc_lower = location.lower().strip()
+    # Includes every state we operate in (config.STATE_NAMES) plus a few
+    # historically-relevant neighbor states for near-miss location matching.
     state_names = {
         "TN": "tennessee", "AL": "alabama", "GA": "georgia",
         "KY": "kentucky", "NC": "north carolina", "VA": "virginia",
+        **{k: v.lower() for k, v in cfg.STATE_NAMES.items()},
     }
     state_name = state_names.get(state, state.lower())
 
@@ -1092,7 +1094,9 @@ def _location_matches(location: str, state: str = "TN", city: str = "") -> tuple
     # Check county/city match for extra confidence
     # SSDI locations look like: "Knox, Tennessee, USA" or "Knoxville, Knox, Tennessee"
     city_lower = city.lower() if city else ""
-    # Map cities to counties for Knox/Blount area
+    # Map cities to counties. Knox/Blount keep their full suburb list (original
+    # market); every other operating county gets its county-seat mapping from
+    # config.COUNTIES (single-city coverage, still far better than nothing).
     county_aliases = {
         "knoxville": ["knox"],
         "farragut": ["knox"],
@@ -1100,6 +1104,7 @@ def _location_matches(location: str, state: str = "TN", city: str = "") -> tuple
         "corryton": ["knox"],
         "maryville": ["blount"],
         "alcoa": ["blount"],
+        **{p.major_city.lower(): [p.county.lower()] for p in cfg.COUNTIES.values()},
     }
 
     if city_lower:

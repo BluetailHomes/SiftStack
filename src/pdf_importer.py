@@ -14,6 +14,7 @@ from pathlib import Path
 import pypdfium2 as pdfium
 from PIL import Image
 
+import config
 from notice_parser import NoticeData
 from image_utils import fix_rotation, ocr_page
 
@@ -43,7 +44,7 @@ ROW_RE = re.compile(
 )
 
 # LLM prompt template for structured extraction
-LLM_PROMPT = """You are parsing OCR text from a scanned tax sale property list for {county} County, Tennessee.
+LLM_PROMPT = """You are parsing OCR text from a scanned tax sale property list for {county} County, {state_full}.
 The table has these columns (left to right):
 1. Row number (may be missing or garbled — ignore it)
 2. Parcel ID (format: digits, optional letters, dash, digits — e.g. "003-04913", "005LB-00801", "018AA-022")
@@ -124,7 +125,8 @@ def parse_page_llm(ocr_text: str, county: str, api_key: str) -> list[dict]:
     import anthropic
 
     client = anthropic.Anthropic(api_key=api_key)
-    prompt = LLM_PROMPT.format(county=county, ocr_text=ocr_text[:12000])
+    state_full = config.state_full_for_county(county) or "Tennessee"
+    prompt = LLM_PROMPT.format(county=county, state_full=state_full, ocr_text=ocr_text[:12000])
 
     try:
         response = client.messages.create(
@@ -218,7 +220,7 @@ def process_pdf(
 
     Args:
         pdf_path: Path to the PDF file.
-        county: "Knox" or "Blount".
+        county: County name — see config.COUNTIES for supported counties.
         api_key: Anthropic API key for LLM parsing (optional).
         date_added: Date string (YYYY-MM-DD) for records. Defaults to today.
         regex_only: If True, skip LLM and use regex only.
@@ -229,7 +231,9 @@ def process_pdf(
     if date_added is None:
         date_added = datetime.now().strftime("%Y-%m-%d")
 
-    default_city = "Knoxville" if county.lower() == "knox" else "Maryville"
+    county_profile = config.COUNTIES.get(county.strip().lower())
+    default_city = county_profile.major_city if county_profile else ""
+    default_state = county_profile.state if county_profile else ""
     use_llm = api_key and not regex_only
 
     logger.info("Processing PDF: %s (%s County)", pdf_path.name, county)
@@ -272,7 +276,7 @@ def process_pdf(
         notice = NoticeData(
             address=row["address"],
             city=default_city,
-            state="TN",
+            state=default_state,
             owner_name=row.get("owner_name", ""),
             notice_type="tax_sale",
             county=county,

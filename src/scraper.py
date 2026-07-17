@@ -50,9 +50,9 @@ async def delay() -> None:
 
 
 def _has_placeholder_credentials() -> bool:
-    """Return True when the configured TNPN credentials are blank or still placeholders."""
-    email = (config.TNPN_EMAIL or "").strip()
-    password = (config.TNPN_PASSWORD or "").strip()
+    """Return True when the configured notice-site credentials are blank or still placeholders."""
+    email = (config.NOTICE_SITE_EMAIL or "").strip()
+    password = (config.NOTICE_SITE_PASSWORD or "").strip()
     placeholder_values = {
         "",
         "your_email@example.com",
@@ -69,13 +69,13 @@ def _has_placeholder_credentials() -> bool:
 
 
 async def login(page: Page, _retries: int = 3) -> bool:
-    """Log in to tnpublicnotice.com Smart Search. Returns True on success.
+    """Log in to the configured public-notice site's Smart Search. Returns True on success.
 
     Retries up to ``_retries`` times on transient network errors (e.g. after
     Apify container migration).
     """
     if _has_placeholder_credentials():
-        logger.error("TNPN credentials are not configured — refusing to attempt login because the values are blank or still placeholder values")
+        logger.error("Notice site credentials are not configured — refusing to attempt login because the values are blank or still placeholder values")
         return False
 
     for attempt in range(1, _retries + 1):
@@ -93,8 +93,8 @@ async def login(page: Page, _retries: int = 3) -> bool:
             return False
 
     # No CAPTCHA on the login page (confirmed via research)
-    await page.fill(SEL_LOGIN_EMAIL, config.TNPN_EMAIL)
-    await page.fill(SEL_LOGIN_PASSWORD, config.TNPN_PASSWORD)
+    await page.fill(SEL_LOGIN_EMAIL, config.NOTICE_SITE_EMAIL)
+    await page.fill(SEL_LOGIN_PASSWORD, config.NOTICE_SITE_PASSWORD)
     await page.click(SEL_LOGIN_SUBMIT)
     await page.wait_for_load_state("networkidle")
     await delay()
@@ -335,6 +335,24 @@ async def run_saved_search(
 # ── Per-Page Scraping ─────────────────────────────────────────────────
 
 
+async def _dump_timeout_screenshot(page: Page, result_num: int, attempt: int) -> None:
+    """Save a screenshot of the current page state when a per-result timeout fires.
+
+    Written to LOG_DIR so it lands alongside the run's log file. Best-effort —
+    if the page itself is unresponsive the screenshot call can also fail, so
+    this never raises.
+    """
+    try:
+        screenshots_dir = config.LOG_DIR / "screenshots"
+        screenshots_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = screenshots_dir / f"timeout_result{result_num}_attempt{attempt}_{timestamp}.png"
+        await page.screenshot(path=str(path), timeout=10_000)
+        logger.warning("  Screenshot saved: %s (page url: %s)", path, page.url)
+    except Exception as e:
+        logger.warning("  Screenshot capture failed: %s", e)
+
+
 async def _scrape_results_page(
     page: Page,
     search: SavedSearch,
@@ -417,7 +435,14 @@ async def _scrape_results_page(
 
                 # Click the View button → navigates to Details.aspx
                 await btn.click()
-                await page.wait_for_load_state("networkidle")
+                # NOT networkidle here — a Cloudflare Turnstile widget (see
+                # captcha_solver.py) starts its own background network
+                # activity the moment the Details page loads, so networkidle
+                # never fires while it's present. domcontentloaded is enough
+                # to know we've landed on the Details page; CAPTCHA-specific
+                # waiting (of either provider) happens inside
+                # solve_captcha_and_view() below.
+                await page.wait_for_load_state("domcontentloaded")
                 await delay()
 
                 # Cross-run dedup: if we've seen this notice ID before, skip CAPTCHA entirely
@@ -485,6 +510,7 @@ async def _scrape_results_page(
 
             except PwTimeout:
                 logger.warning("  Timeout on result %d (attempt %d/%d)", idx + 1, attempt, MAX_RETRIES)
+                await _dump_timeout_screenshot(page, idx + 1, attempt)
                 # Try to recover by going back to results
                 try:
                     await page.go_back()
@@ -709,6 +735,7 @@ async def scrape_all(
     seen_ids: dict[str, str] | None = None,
     captcha_failed_ids: dict[str, dict] | None = None,
     on_search_complete=None,
+    headless: bool = True,
 ) -> list[NoticeData]:
     """Main entry point for scraping.
 
@@ -725,6 +752,8 @@ async def scrape_all(
         on_search_complete: Optional async callback(seen_ids) fired after each search
                             completes, so callers can persist seen_ids to their own
                             backing store (e.g. Apify KVS).
+        headless: Run the browser headless (default True). Set False to watch the
+                  browser live — useful for debugging stuck/timing-out pages.
 
     Returns:
         All scraped and filtered NoticeData.
@@ -767,7 +796,7 @@ async def scrape_all(
     all_notices: list[NoticeData] = []
 
     async with async_playwright() as p:
-        launch_opts: dict = {"headless": True}
+        launch_opts: dict = {"headless": headless}
         if proxy_url:
             # Parse proxy URL (format: http://user:pass@host:port)
             from urllib.parse import urlparse

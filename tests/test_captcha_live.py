@@ -22,8 +22,8 @@ from config import (
     SEL_LOGIN_SUBMIT,
     SEL_SAVED_SEARCHES_DROPDOWN,
     SEL_VIEW_BUTTON_PATTERN,
-    TNPN_EMAIL,
-    TNPN_PASSWORD,
+    NOTICE_SITE_EMAIL,
+    NOTICE_SITE_PASSWORD,
     CAPTCHA_API_KEY,
 )
 from captcha_solver import detect_captcha, solve_captcha_and_view
@@ -38,8 +38,8 @@ logger = logging.getLogger("test_captcha")
 
 async def main():
     # Pre-flight checks
-    if not TNPN_EMAIL or not TNPN_PASSWORD:
-        logger.error("TNPN_EMAIL / TNPN_PASSWORD not set in .env")
+    if not NOTICE_SITE_EMAIL or not NOTICE_SITE_PASSWORD:
+        logger.error("NOTICE_SITE_EMAIL / NOTICE_SITE_PASSWORD not set in .env")
         return
     if not CAPTCHA_API_KEY:
         logger.error("CAPTCHA_API_KEY not set in .env")
@@ -58,8 +58,8 @@ async def main():
         await page.goto(LOGIN_URL)
         await page.wait_for_load_state("networkidle")
 
-        await page.fill(SEL_LOGIN_EMAIL, TNPN_EMAIL)
-        await page.fill(SEL_LOGIN_PASSWORD, TNPN_PASSWORD)
+        await page.fill(SEL_LOGIN_EMAIL, NOTICE_SITE_EMAIL)
+        await page.fill(SEL_LOGIN_PASSWORD, NOTICE_SITE_PASSWORD)
         await page.click(SEL_LOGIN_SUBMIT)
         await page.wait_for_load_state("networkidle")
 

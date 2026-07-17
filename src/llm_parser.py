@@ -6,6 +6,7 @@ this module sends the raw notice text to Claude Haiku for structured extraction.
 
 import logging
 
+import config
 import llm_client
 
 logger = logging.getLogger(__name__)
@@ -14,17 +15,17 @@ MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 256
 
 SYSTEM_PROMPT = (
-    "You extract structured data from Tennessee legal notices. "
+    "You extract structured data from US county legal notices. "
     "Return ONLY valid JSON with no markdown formatting, no code fences, no explanation."
 )
 
 USER_PROMPT_TEMPLATE = """\
-Extract the following fields from this {notice_type} legal notice published in {county} County, Tennessee.
+Extract the following fields from this {notice_type} legal notice published in {county} County, {state_full}.
 
 Return ONLY a JSON object with these exact keys:
 - "address": the property street address (e.g. "123 Main St"). NOT the courthouse, auction location, or trustee office address.
 - "city": the city where the property is located
-- "state": always "TN"
+- "state": the 2-letter state code — "{state_abbr}" if in {state_full}
 - "zip": the 5-digit zip code of the property
 - "owner_name": the property owner, borrower, or grantor name(s). For foreclosures this is who executed the deed of trust. Use ALL CAPS as written in the notice.
 - "auction_date": the scheduled sale/auction date in YYYY-MM-DD format. This is the date the property will be sold at auction, NOT the publication date of the notice.
@@ -35,18 +36,18 @@ Notice text:
 {raw_text}"""
 
 PROBATE_PROMPT_TEMPLATE = """\
-Extract the following fields from this probate "Notice to Creditors" published in {county} County, Tennessee.
+Extract the following fields from this probate "Notice to Creditors" published in {county} County, {state_full}.
 
 Return ONLY a JSON object with these exact keys:
 - "decedent_name": the deceased person's full name (from "Estate of [NAME]"). Use ALL CAPS as written.
 - "owner_name": the Personal Representative, Executor, or Administrator name. This is the person appointed to manage the estate. Use ALL CAPS as written. Do NOT include their title (e.g. drop "Administratrix", "Co-Administrator", "Executor").
 - "owner_street": the PR/Executor's mailing street address (e.g. "2004 Shangri-La Drive"). This is where creditors send claims.
 - "owner_city": the city of the PR's mailing address
-- "owner_state": the state of the PR's mailing address (usually "TN")
+- "owner_state": the state of the PR's mailing address (usually "{state_abbr}")
 - "owner_zip": the 5-digit zip code of the PR's mailing address
 - "address": leave as empty string "" (probate notices do not contain the decedent's property address)
 - "city": leave as empty string ""
-- "state": "TN"
+- "state": "{state_abbr}"
 - "zip": leave as empty string ""
 
 If a field cannot be determined from the text, use an empty string "".
@@ -55,7 +56,7 @@ Notice text:
 {raw_text}"""
 
 EVICTION_PROMPT_TEMPLATE = """\
-Extract the following fields from this eviction notice / detainer warrant from {county} County, Tennessee.
+Extract the following fields from this eviction notice / detainer warrant from {county} County, {state_full}.
 
 The PLAINTIFF is the landlord (property owner) — this is who we want to contact.
 The DEFENDANT is the tenant being evicted.
@@ -64,7 +65,7 @@ Return ONLY a JSON object with these exact keys:
 - "owner_name": the PLAINTIFF name (landlord/property owner). Use ALL CAPS as written.
 - "address": the rental property street address where the eviction is occurring
 - "city": the city where the property is located
-- "state": always "TN"
+- "state": the 2-letter state code — "{state_abbr}" if in {state_full}
 - "zip": the 5-digit zip code of the property
 - "case_number": the court case number
 - "filing_date": the filing date in YYYY-MM-DD format
@@ -76,13 +77,13 @@ Notice text:
 {raw_text}"""
 
 CODE_VIOLATION_PROMPT_TEMPLATE = """\
-Extract the following fields from this code violation notice from {county} County, Tennessee.
+Extract the following fields from this code violation notice from {county} County, {state_full}.
 
 Return ONLY a JSON object with these exact keys:
 - "owner_name": the property owner name. Use ALL CAPS as written.
 - "address": the property street address where the violation exists
 - "city": the city where the property is located
-- "state": always "TN"
+- "state": the 2-letter state code — "{state_abbr}" if in {state_full}
 - "zip": the 5-digit zip code of the property
 - "parcel_id": the parcel ID / tax map number if shown
 - "violation_type": brief description of the violation (e.g. "overgrown lot", "condemned structure")
@@ -94,14 +95,14 @@ Notice text:
 {raw_text}"""
 
 DIVORCE_PROMPT_TEMPLATE = """\
-Extract the following fields from this divorce filing / complaint from {county} County, Tennessee.
+Extract the following fields from this divorce filing / complaint from {county} County, {state_full}.
 
 Return ONLY a JSON object with these exact keys:
 - "owner_name": the PETITIONER name (person filing for divorce). Use ALL CAPS as written.
 - "spouse_name": the RESPONDENT name (other party). Use ALL CAPS as written.
 - "address": the marital home / property address if listed (may be on property schedule page)
 - "city": the city where the property is located
-- "state": always "TN"
+- "state": the 2-letter state code — "{state_abbr}" if in {state_full}
 - "zip": the 5-digit zip code of the property
 - "case_number": the court case number
 
@@ -111,7 +112,7 @@ Notice text:
 {raw_text}"""
 
 AUTO_DETECT_PROMPT_TEMPLATE = """\
-Classify this legal document from {county} County, Tennessee into one of these categories:
+Classify this legal document from {county} County, {state_full} into one of these categories:
 - "foreclosure" — trustee sale, deed of trust, notice of default
 - "tax_sale" — delinquent property tax auction
 - "tax_delinquent" — unpaid property taxes, no auction yet
@@ -169,6 +170,9 @@ async def extract_with_llm(
     # Truncate to ~8000 chars to stay within token limits while keeping cost low
     text = raw_text[:8000]
 
+    state_abbr = config.state_for_county(county) or "TN"
+    state_full = config.STATE_NAMES.get(state_abbr, "Tennessee")
+
     # Route to type-specific prompt
     prompt_map = {
         "probate": (PROBATE_PROMPT_TEMPLATE, _PROBATE_KEYS),
@@ -179,11 +183,14 @@ async def extract_with_llm(
 
     if notice_type in prompt_map:
         template, expected = prompt_map[notice_type]
-        prompt = template.format(county=county, raw_text=text)
+        prompt = template.format(
+            county=county, state_full=state_full, state_abbr=state_abbr, raw_text=text,
+        )
     else:
         # Default: foreclosure / tax_sale / tax_delinquent
         prompt = USER_PROMPT_TEMPLATE.format(
-            notice_type=notice_type, county=county, raw_text=text,
+            notice_type=notice_type, county=county,
+            state_full=state_full, state_abbr=state_abbr, raw_text=text,
         )
         expected = _FORECLOSURE_KEYS
 
@@ -244,7 +251,11 @@ async def auto_detect_notice_type(
         return None
 
     text = raw_text[:4000]  # Less text needed for classification
-    prompt = AUTO_DETECT_PROMPT_TEMPLATE.format(county=county, raw_text=text)
+    state_abbr = config.state_for_county(county) or "TN"
+    state_full = config.STATE_NAMES.get(state_abbr, "Tennessee")
+    prompt = AUTO_DETECT_PROMPT_TEMPLATE.format(
+        county=county, state_full=state_full, raw_text=text,
+    )
 
     try:
         parsed = await llm_client.chat_json_async(

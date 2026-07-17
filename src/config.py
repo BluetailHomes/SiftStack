@@ -28,15 +28,19 @@ PHOTO_STATE_FILE = PROJECT_ROOT / "photo_state.json"
 
 # ── Dropbox Watcher ────────────────────────────────────────────────────
 DROPBOX_POLL_INTERVAL = int(os.getenv("DROPBOX_POLL_INTERVAL", "900"))  # seconds (default 15 min)
-DROPBOX_ROOT_FOLDER = os.getenv("DROPBOX_ROOT_FOLDER", "")  # root folder path in Dropbox, e.g. "/TN Public Notice"
+DROPBOX_ROOT_FOLDER = os.getenv("DROPBOX_ROOT_FOLDER", "")  # root folder path in Dropbox, e.g. "/Bluetail Courthouse Photos"
 DROPBOX_STORAGE_WARN_PERCENT = 80  # warn when storage usage exceeds this %
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 LOG_DIR.mkdir(exist_ok=True)
 
 # ── Credentials ────────────────────────────────────────────────────────
-TNPN_EMAIL = os.getenv("TNPN_EMAIL", "")
-TNPN_PASSWORD = os.getenv("TNPN_PASSWORD", "")
+# NOTICE_SITE_EMAIL/PASSWORD log in to whichever public-notice platform is
+# active (see COUNTIES below) — currently mopublicnotices.com for the live
+# Missouri counties. Falls back to the legacy TNPN_* env var names for
+# backwards compatibility with .env files that haven't been migrated yet.
+NOTICE_SITE_EMAIL = os.getenv("NOTICE_SITE_EMAIL", os.getenv("TNPN_EMAIL", ""))
+NOTICE_SITE_PASSWORD = os.getenv("NOTICE_SITE_PASSWORD", os.getenv("TNPN_PASSWORD", ""))
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "")  # 2Captcha API key
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")  # Claude Haiku for LLM parsing
 SMARTY_AUTH_ID = os.getenv("SMARTY_AUTH_ID", "")        # Smarty address standardization
@@ -85,10 +89,21 @@ SEL_VIEW_BUTTON_PATTERN = "input[name$='btnView2'], input[name$='btnView']"
 SEL_NEXT_PAGE_BUTTON = "#ctl00_ContentPlaceHolder1_WSExtendedGrid1_GridView1_ctl01_btnNext"
 SEL_PAGE_INFO = "table.wsResultsGrid"
 
-# Notice detail page
+# Notice detail page — two independent CAPTCHA providers are in play
+# depending on which notice site/county is being scraped. See
+# captcha_solver.py for the explicit-detection dispatcher.
 SEL_CAPTCHA_IFRAME = "iframe[src*='recaptcha']"
+# mopublicnotices.com's Turnstile widget iframe has NO `src` attribute at
+# all (confirmed via live DOM dump 2026-07-16 — tests/diag_turnstile.py) —
+# an iframe[src*=...] selector can never match it. The reliable marker is
+# the widget's own container div, which carries Cloudflare's standard
+# `cf-turnstile` class regardless of its (ASP.NET-legacy-named) id.
+SEL_TURNSTILE_WIDGET = ".cf-turnstile"
 SEL_VIEW_NOTICE_BUTTON = "#ctl00_ContentPlaceHolder1_PublicNoticeDetailsBody1_btnViewNotice"
-RECAPTCHA_SITEKEY = "6LdtSg8sAAAAADTdRyZxJ2R2sS82pKALNMvMqSyL"
+RECAPTCHA_SITEKEY = "6LdtSg8sAAAAADTdRyZxJ2R2sS82pKALNMvMqSyL"  # legacy tnpublicnotice.com build
+# Turnstile has no fixed sitekey here — it's extracted live from the page DOM
+# per-notice (see captcha_solver._extract_turnstile_sitekey), confirmed
+# present on mopublicnotices.com's Details.aspx pages (2026-07-16).
 
 # ── Rate Limiting ──────────────────────────────────────────────────────
 REQUEST_DELAY_MIN = 2.0  # seconds between requests
@@ -105,17 +120,199 @@ TESSERACT_PSM_PHOTO = 4  # assume single column of variable-size text — best f
 NOTICE_TYPES = ["foreclosure", "probate"]
 
 
+# ── County / Market Registry ────────────────────────────────────────────
+# Single source of truth for which counties SiftStack operates in and what
+# state/data-source each one maps to. Other modules should derive state
+# abbreviations, state full names, city fallbacks, and reference URLs from
+# this registry instead of hardcoding a single state.
+#
+# notice_platform values and what they mean for scraper.py compatibility:
+#   "mopublicnotices"         - ASP.NET WebForms (Missouri Press Association).
+#                                Live and verified working with the current
+#                                scraper automation.
+#   "newmexicopublicnotices"  - ASP.NET WebForms, same "lrsws.co" vendor
+#                                domain as the original tnpublicnotice.com
+#                                (verified via TLS cert SAN inspection).
+#                                High-confidence compatible, but NOT yet
+#                                live: saved searches must be created in the
+#                                site UI and credentials obtained first.
+#   "oklahomanotices"         - Backed by opa.eclipping.org, a DIFFERENT
+#                                vendor (not ASP.NET WebForms). NOT
+#                                compatible with the current scraper
+#                                automation — needs dedicated scraper work.
+#   "kansaspublicnotices"     - Backed by "NewzGroup" (shared TLS cert with
+#                                kypublicnotice.com/ndpublicnotices.com), a
+#                                THIRD vendor. Also NOT compatible with the
+#                                current scraper automation.
+#   "tnpublicnotice" (legacy) - Original ASP.NET WebForms platform. Kept for
+#                                Knox/Blount, which are dormant/legacy, not
+#                                actively scraped.
+@dataclass
+class CountyProfile:
+    """Metadata for one operating county — the market/state model other
+    modules should key off of instead of hardcoding a single state."""
+    county: str            # "Jackson"
+    state: str              # "MO" — 2-letter USPS abbreviation
+    state_full: str         # "Missouri" — for search queries/regexes that need the full name
+    notice_platform: str    # key into NOTICE_PLATFORMS below
+    scraper_ready: bool     # True only if the current Playwright automation can drive this platform
+    major_city: str         # county seat / primary city, used as a city-fallback match
+    zip_prefixes: list[str] # approximate 3-digit ZIP prefixes for this county (soft validation heuristic only)
+    assessor_url: str       # county tax assessor site — reference only, no public API assumed
+    court_records_url: str  # court/case-record lookup system — reference only
+    active: bool = True     # False = dormant/legacy market, excluded from default SAVED_SEARCHES
+    notes: str = ""         # caveats worth remembering (e.g. "probate coverage unconfirmed")
+
+
+NOTICE_PLATFORMS: dict[str, str] = {
+    "mopublicnotices": "https://www.mopublicnotices.com",
+    "newmexicopublicnotices": "https://www.newmexicopublicnotices.com",
+    "oklahomanotices": "https://www.oklahomanotices.com",
+    "kansaspublicnotices": "https://www.kansaspublicnotices.com",
+    "tnpublicnotice": "https://www.tnpublicnotice.com",
+}
+
+COUNTIES: dict[str, CountyProfile] = {
+    # ── Missouri — live, ASP.NET WebForms, already verified working ────
+    "jackson": CountyProfile(
+        county="Jackson", state="MO", state_full="Missouri",
+        notice_platform="mopublicnotices", scraper_ready=True,
+        major_city="Kansas City", zip_prefixes=["640", "641"],
+        assessor_url="https://www.jacksongov.org/departments/collection-taxes-assessment/assessment",
+        court_records_url="https://www.courts.mo.gov/casenet/base/welcome.do",
+        notes="Foreclosure/tax-sale notices confirmed on mopublicnotices.com; "
+              "probate coverage not confirmed in site copy — verify on first live pull. "
+              "ArcGIS Open Data Hub parcel layers available as a closer-to-API assessor option.",
+    ),
+    "clay": CountyProfile(
+        county="Clay", state="MO", state_full="Missouri",
+        notice_platform="mopublicnotices", scraper_ready=True,
+        major_city="Liberty", zip_prefixes=["640", "641"],
+        assessor_url="https://gisweb.claycountymo.gov/ps/",
+        court_records_url="https://www.courts.mo.gov/casenet/base/welcome.do",
+        notes="Same caveats as Jackson — probate coverage unconfirmed on mopublicnotices.com.",
+    ),
+    "platte": CountyProfile(
+        county="Platte", state="MO", state_full="Missouri",
+        notice_platform="mopublicnotices", scraper_ready=True,
+        major_city="Platte City", zip_prefixes=["640", "641"],
+        assessor_url="https://www.co.platte.mo.us/real-property",
+        court_records_url="https://www.courts.mo.gov/casenet/base/welcome.do",
+        notes="Same caveats as Jackson — probate coverage unconfirmed on mopublicnotices.com.",
+    ),
+    "cass": CountyProfile(
+        county="Cass", state="MO", state_full="Missouri",
+        notice_platform="mopublicnotices", scraper_ready=True,
+        major_city="Harrisonville", zip_prefixes=["647", "640"],
+        assessor_url="https://cass.missouriassessors.com/search.php",
+        court_records_url="https://www.courts.mo.gov/casenet/base/welcome.do",
+        notes="Same caveats as Jackson — probate coverage unconfirmed on mopublicnotices.com.",
+    ),
+    # ── New Mexico — config-ready, not yet live (see notice_platform note above) ──
+    "bernalillo": CountyProfile(
+        county="Bernalillo", state="NM", state_full="New Mexico",
+        notice_platform="newmexicopublicnotices", scraper_ready=True, active=False,
+        major_city="Albuquerque", zip_prefixes=["871", "870"],
+        assessor_url="https://www.bernco.gov/assessor/",
+        court_records_url="https://caselookup.nmcourts.gov/",
+        notes="Same vendor (lrsws.co) as tnpublicnotice.com — high-confidence scraper-compatible, "
+              "but saved searches must be created in the site UI + credentials obtained before first run. "
+              "Probate case coverage on caselookup.nmcourts.gov is district-court only; NM often handles "
+              "routine probate through an independent county Probate Court — verify separately. "
+              "ArcGIS Open Data Hub parcel layers available as a closer-to-API assessor option.",
+    ),
+    "sandoval": CountyProfile(
+        county="Sandoval", state="NM", state_full="New Mexico",
+        notice_platform="newmexicopublicnotices", scraper_ready=True, active=False,
+        major_city="Rio Rancho", zip_prefixes=["870", "871"],
+        assessor_url="https://eaweb.sandovalcountynm.gov/Assessor",
+        court_records_url="https://caselookup.nmcourts.gov/",
+        notes="Same caveats as Bernalillo (not yet live — needs saved searches created in site UI).",
+    ),
+    # ── Oklahoma — NOT scraper-compatible with the current automation ──
+    "oklahoma": CountyProfile(
+        county="Oklahoma", state="OK", state_full="Oklahoma",
+        notice_platform="oklahomanotices", scraper_ready=False, active=False,
+        major_city="Oklahoma City", zip_prefixes=["731", "730"],
+        assessor_url="https://docs.oklahomacounty.org/AssessorWP5/DefaultSearch.asp",
+        court_records_url="https://www.oscn.net/dockets/Search.aspx",
+        notes="oklahomanotices.com's search backend is opa.eclipping.org — a different vendor than the "
+              "ASP.NET WebForms platform this scraper automates. Needs dedicated scraper development; "
+              "not something to fake with unverified selectors.",
+    ),
+    "tulsa": CountyProfile(
+        county="Tulsa", state="OK", state_full="Oklahoma",
+        notice_platform="oklahomanotices", scraper_ready=False, active=False,
+        major_city="Tulsa", zip_prefixes=["741", "740"],
+        assessor_url="https://assessor.tulsacounty.org/Property/Search",
+        court_records_url="https://www.oscn.net/dockets/Search.aspx",
+        notes="Same caveats as Oklahoma County (not scraper-compatible yet).",
+    ),
+    # ── Kansas — NOT scraper-compatible with the current automation ────
+    "johnson": CountyProfile(
+        county="Johnson", state="KS", state_full="Kansas",
+        notice_platform="kansaspublicnotices", scraper_ready=False, active=False,
+        major_city="Olathe", zip_prefixes=["660", "661", "662"],
+        assessor_url="https://www.jocogov.org/department/appraiser/property-data",
+        court_records_url="https://www.kscourts.gov/eCourt/District-Court-Records",
+        notes="kansaspublicnotices.com runs on a 'NewzGroup'-family vendor (shared TLS cert with "
+              "kypublicnotice.com/ndpublicnotices.com) — different platform than this scraper automates. "
+              "Needs dedicated scraper development. Court records moved from a county-only terminal system "
+              "to the statewide Kansas eCourt portal in Nov 2024.",
+    ),
+    # ── Tennessee — dormant/legacy, kept functional but inactive ───────
+    "knox": CountyProfile(
+        county="Knox", state="TN", state_full="Tennessee",
+        notice_platform="tnpublicnotice", scraper_ready=True, active=False,
+        major_city="Knoxville", zip_prefixes=["377", "378", "379"],
+        assessor_url="https://www.kgis.org",
+        court_records_url="",
+        notes="Original build market. Kept dormant (not deleted) — has the only real tax-API integration "
+              "(Knox County Tax API) and Knoxville-calibrated rehab/comp/deal-analysis defaults.",
+    ),
+    "blount": CountyProfile(
+        county="Blount", state="TN", state_full="Tennessee",
+        notice_platform="tnpublicnotice", scraper_ready=True, active=False,
+        major_city="Maryville", zip_prefixes=["377", "378"],
+        assessor_url="https://assessment.cot.tn.gov",
+        court_records_url="",
+        notes="Dormant/legacy market, kept alongside Knox — TPAD scraper only, no free tax API.",
+    ),
+}
+
+
 @dataclass
 class SavedSearch:
-    """Represents a saved search on mopublicnotices.com."""
+    """Represents a saved search on the county's notice platform (see COUNTIES)."""
     county: str
     notice_type: str  # One of NOTICE_TYPES
     saved_search_name: str  # Exact name in the Saved Searches dropdown
 
 
+def state_for_county(county: str) -> str:
+    """Look up the 2-letter state abbreviation for a known county. Empty string if unknown."""
+    profile = COUNTIES.get((county or "").strip().lower())
+    return profile.state if profile else ""
+
+
+def state_full_for_county(county: str) -> str:
+    """Look up the full state name for a known county. Empty string if unknown."""
+    profile = COUNTIES.get((county or "").strip().lower())
+    return profile.state_full if profile else ""
+
+
+# All state abbreviations/full names present in the registry — used to build
+# state-token regexes and validation sets so they aren't hardcoded to TN.
+KNOWN_STATE_ABBRS: set[str] = {p.state for p in COUNTIES.values()}
+STATE_NAMES: dict[str, str] = {p.state: p.state_full for p in COUNTIES.values()}
+
+
 # ── Saved Searches ─────────────────────────────────────────────────────
 # These names must match exactly what appears in the dropdown on the site.
 # Create the dropdown entries with these exact labels before the first real run.
+# Only ACTIVE + scraper_ready counties are included — Oklahoma/Kansas aren't
+# scrapable with the current automation yet, and New Mexico's saved searches
+# haven't been created in the site UI yet (see COUNTIES notes above).
 SAVED_SEARCHES: list[SavedSearch] = [
     SavedSearch("Jackson", "probate", "Jackson County Probate"),
     SavedSearch("Clay", "probate", "Clay County Probate"),

@@ -1963,7 +1963,7 @@ async def manage_sold_properties(
     the property actually sold (not the current date).
 
     Steps per county per month:
-    1. Search SiftMap by "Knox County, TN" (county-level search)
+    1. Search SiftMap by "{County} County, {State}" (county-level search)
     2. Set Last Sold Date filter: first day → last day of that month
     3. Use select-all checkbox + pagination to capture all results
     4. Add to account with "Sold" + "Sold YYYY-MM" tags
@@ -1971,7 +1971,7 @@ async def manage_sold_properties(
 
     Args:
         page: Logged-in Playwright page.
-        counties: Counties to search (default: ["Knox", "Blount"]).
+        counties: Counties to search (default: all active counties in config.COUNTIES).
         months_back: How many months back to search for sales (default: 1).
         min_sale_price: Minimum sale price filter to exclude deed transfers.
         sold_tag_date: If set, overrides per-month tag (use for single-month runs).
@@ -1990,7 +1990,7 @@ async def manage_sold_properties(
         "month_details": [],
     }
 
-    counties = counties or ["Knox", "Blount"]
+    counties = counties or [p.county for p in config.COUNTIES.values() if p.active]
 
     # Build list of (year, month) tuples to process — oldest first
     now = datetime.now()
@@ -2431,19 +2431,35 @@ async def _siftmap_search_sold(
     import json as _json
     from urllib.parse import quote as _quote
 
-    # County FIPS codes for TN counties
+    # County FIPS codes, verified against the FCC's authoritative state+county
+    # FIPS reference (transition.fcc.gov/oet/info/maps/census/fips/fips.txt).
     COUNTY_FIPS = {
         "Knox": "47093",
         "Blount": "47009",
+        "Jackson": "29095",
+        "Clay": "29047",
+        "Platte": "29165",
+        "Cass": "29037",
+        "Johnson": "20091",
+        "Bernalillo": "35001",
+        "Sandoval": "35043",
+        "Oklahoma": "40109",
+        "Tulsa": "40143",
     }
 
     result = {"success": False, "records_added": 0, "message": ""}
+
+    if county not in COUNTY_FIPS:
+        result["message"] = f"No FIPS code configured for county '{county}' — cannot build a reliable SiftMap search"
+        logger.error(result["message"])
+        return result
 
     try:
         # ── Step 1: Navigate directly via URL with all filters ──
         # This is far more reliable than interacting with the calendar UI.
         # URL params: location (county JSON), date range, min sale price.
-        fips = COUNTY_FIPS.get(county, "47093")
+        fips = COUNTY_FIPS[county]
+        state = config.state_for_county(county) or "TN"
 
         # Convert dates from MM/DD/YYYY to YYYY-MM-DD for URL params
         from datetime import datetime as _dt
@@ -2454,9 +2470,9 @@ async def _siftmap_search_sold(
 
         location = _json.dumps({
             "searchType": "county",
-            "title": f"{county} County, TN",
+            "title": f"{county} County, {state}",
             "county": county,
-            "state": "TN",
+            "state": state,
             "counties": [{"fips": fips, "county_name": county}],
         })
 
@@ -2535,7 +2551,7 @@ async def run_manage_sold_workflow(
     Top-level orchestrator for the manage-sold CLI command.
 
     Args:
-        counties: Counties to search (default: Knox, Blount).
+        counties: Counties to search (default: all active counties in config.COUNTIES).
         months_back: Months of sales to pull (default: 1).
         min_sale_price: Min sale price to exclude deed transfers (default: $1,000).
         sold_tag_date: Tag date YYYY-MM (default: current month).
