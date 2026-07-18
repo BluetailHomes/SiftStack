@@ -11,7 +11,6 @@ import llm_client
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 256
 
 SYSTEM_PROMPT = (
@@ -197,6 +196,7 @@ async def extract_with_llm(
     try:
         parsed = await llm_client.chat_json_async(
             prompt, system=SYSTEM_PROMPT, max_tokens=MAX_TOKENS, api_key=api_key,
+            model=config.LLM_MODELS["ocr_extraction"], cache_system=True,
         )
 
         if not parsed:
@@ -260,6 +260,7 @@ async def auto_detect_notice_type(
     try:
         parsed = await llm_client.chat_json_async(
             prompt, system=SYSTEM_PROMPT, max_tokens=64, api_key=api_key,
+            model=config.LLM_MODELS["ocr_extraction"], cache_system=True,
         )
         if not parsed or "notice_type" not in parsed:
             return None

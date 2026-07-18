@@ -28,7 +28,6 @@ from notice_parser import NoticeData
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 1024
 SEARCH_DELAY_MIN = 0.5
 SEARCH_DELAY_MAX = 1.0
@@ -713,7 +712,10 @@ def _search_survivors_targeted(
     )
 
     try:
-        parsed = llm_client.chat_json(prompt, system=SYSTEM_PROMPT, max_tokens=MAX_TOKENS, api_key=api_key)
+        parsed = llm_client.chat_json(
+            prompt, system=SYSTEM_PROMPT, max_tokens=MAX_TOKENS, api_key=api_key,
+            model=config.LLM_MODELS["obituary_support"], cache_system=True,
+        )
         if not parsed:
             return []
         survivors = parsed.get("survivors", [])
@@ -763,7 +765,10 @@ def _extract_survivors_aggressive(
     )
 
     try:
-        parsed = llm_client.chat_json(prompt, system=SYSTEM_PROMPT, max_tokens=512, api_key=api_key)
+        parsed = llm_client.chat_json(
+            prompt, system=SYSTEM_PROMPT, max_tokens=512, api_key=api_key,
+            model=config.LLM_MODELS["obituary_support"], cache_system=True,
+        )
         if not parsed:
             return []
         survivors = parsed.get("survivors", [])
@@ -897,7 +902,10 @@ def _lookup_dm_address_web(name: str, city: str, api_key: str, state_abbr: str =
                 page_text=page_text[:MAX_OBITUARY_TEXT],
             )
             try:
-                parsed = llm_client.chat_json(prompt, system=SYSTEM_PROMPT, max_tokens=256, api_key=api_key)
+                parsed = llm_client.chat_json(
+                    prompt, system=SYSTEM_PROMPT, max_tokens=256, api_key=api_key,
+                    model=config.LLM_MODELS["obituary_support"], cache_system=True,
+                )
                 if parsed:
                     street = parsed.get("street", "").strip()
                     if street and parsed.get("confidence") in ("high", "medium"):
@@ -1106,7 +1114,10 @@ def _extract_address_from_page(
         page_text=page_text[:MAX_ADDRESS_TEXT],
     )
     try:
-        parsed = llm_client.chat_json(prompt, system=SYSTEM_PROMPT, max_tokens=256, api_key=api_key)
+        parsed = llm_client.chat_json(
+            prompt, system=SYSTEM_PROMPT, max_tokens=256, api_key=api_key,
+            model=config.LLM_MODELS["obituary_support"], cache_system=True,
+        )
         if not parsed:
             return None
 
@@ -1557,7 +1568,10 @@ def _parse_obituary_with_llm(
     )
 
     try:
-        parsed = llm_client.chat_json(prompt, system=SYSTEM_PROMPT, max_tokens=MAX_TOKENS, api_key=api_key)
+        parsed = llm_client.chat_json(
+            prompt, system=SYSTEM_PROMPT, max_tokens=MAX_TOKENS, api_key=api_key,
+            model=config.LLM_MODELS["obituary_match"], cache_system=True,
+        )
         if not parsed:
             return None
 

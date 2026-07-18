@@ -61,12 +61,37 @@ DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN", "")
 
 # ── LLM Backend ──────────────────────────────────────────────────────
 LLM_BACKEND = os.getenv("LLM_BACKEND", "anthropic")           # "anthropic", "ollama", or "openrouter"
-LLM_MODEL = os.getenv("LLM_MODEL", "claude-haiku-4-5-20251001")  # Anthropic model name
+LLM_MODEL = os.getenv("LLM_MODEL", "claude-haiku-4-5-20251001")  # fallback default; overridden per call site by LLM_MODELS below
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")        # Local Ollama model
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1/")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")       # OpenRouter API key
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen-2.5-72b-instruct")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
+# Per-call-site Anthropic model pinning, so cost/capability match the task
+# instead of every call sharing one global model. Keys are call-site
+# purposes rather than filenames since obituary_enricher.py splits across
+# two tiers. Only used when LLM_BACKEND == "anthropic" — Ollama/OpenRouter
+# dev backends keep using OLLAMA_MODEL/OPENROUTER_MODEL regardless.
+LLM_MODELS = {
+    # High-volume, low-reasoning structured field extraction — runs on
+    # every notice where regex fails. llm_parser.py (scraped-notice +
+    # courthouse-photo OCR fallback), pdf_importer.py (bulk PDF table parse).
+    "ocr_extraction": "claude-haiku-4-5-20251001",
+    # LLC/entity signer extraction from web search snippets — one bounded
+    # extraction call, not multi-step reasoning. entity_researcher.py.
+    "entity_research": "claude-haiku-4-5-20251001",
+    # obituary_enricher.py survivor-name and mailing-address extraction —
+    # mechanical extraction, not the deceased-owner match judgment call.
+    "obituary_support": "claude-haiku-4-5-20251001",
+    # obituary_enricher.py's DOD/name match against the property owner —
+    # wrong answer means contacting the wrong family member, needs real
+    # judgment. _parse_obituary_with_llm() only.
+    "obituary_match": "claude-sonnet-5",
+    # Deep-prospecting report prose summary — low volume (once per report),
+    # low stakes, has a deterministic template fallback if this fails.
+    "situation_summary": "claude-haiku-4-5-20251001",
+}
 
 # ── Site URLs ──────────────────────────────────────────────────────────
 BASE_URL = "https://www.mopublicnotices.com"

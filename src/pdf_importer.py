@@ -130,9 +130,13 @@ def parse_page_llm(ocr_text: str, county: str, api_key: str) -> list[dict]:
 
     try:
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=config.LLM_MODELS["ocr_extraction"],
             max_tokens=4096,
-            system="You extract structured data from OCR text. Return ONLY valid JSON arrays.",
+            system=[{
+                "type": "text",
+                "text": "You extract structured data from OCR text. Return ONLY valid JSON arrays.",
+                "cache_control": {"type": "ephemeral"},
+            }],
             messages=[{"role": "user", "content": prompt}],
         )
         raw = response.content[0].text.strip()

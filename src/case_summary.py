@@ -345,6 +345,8 @@ def build_situation_prose(notice: NoticeData, api_key: str | None = None) -> str
             system=_SITUATION_SYSTEM,
             max_tokens=300,
             api_key=key,
+            model=config.LLM_MODELS["situation_summary"],
+            cache_system=True,
         )
         if result and isinstance(result, dict):
             prose = (result.get("situation") or "").strip()

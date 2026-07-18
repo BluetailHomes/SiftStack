@@ -23,8 +23,17 @@ def chat_json(
     system: str = "",
     max_tokens: int = 1024,
     api_key: str | None = None,
+    model: str | None = None,
+    cache_system: bool = False,
 ) -> dict | None:
     """Send prompt, get parsed JSON response. Routes to configured backend.
+
+    `model` overrides the backend's default model — used for per-call-site
+    pinning (see config.LLM_MODELS). Ignored by the Ollama/OpenRouter dev
+    backends, which always use their own configured model.
+    `cache_system` marks the system prompt as an Anthropic ephemeral cache
+    breakpoint. No effect below Anthropic's minimum cacheable prompt length
+    (1024 tokens for Sonnet/Opus, 2048 for Haiku) or on non-Anthropic backends.
 
     Returns parsed dict on success, None on failure.
     """
@@ -34,7 +43,7 @@ def chat_json(
     elif backend == "openrouter":
         return _chat_openrouter(prompt, system, max_tokens)
     else:
-        return _chat_anthropic(prompt, system, max_tokens, api_key)
+        return _chat_anthropic(prompt, system, max_tokens, api_key, model, cache_system)
 
 
 def chat_json_async(
@@ -42,8 +51,13 @@ def chat_json_async(
     system: str = "",
     max_tokens: int = 1024,
     api_key: str | None = None,
+    model: str | None = None,
+    cache_system: bool = False,
 ):
-    """Async version — returns a coroutine. For llm_parser.py compatibility."""
+    """Async version — returns a coroutine. For llm_parser.py compatibility.
+
+    See chat_json() for `model`/`cache_system` semantics.
+    """
     import asyncio
     backend = getattr(cfg, "LLM_BACKEND", "anthropic")
     if backend == "ollama":
@@ -51,16 +65,29 @@ def chat_json_async(
     elif backend == "openrouter":
         return _chat_openrouter_async(prompt, system, max_tokens)
     else:
-        return _chat_anthropic_async(prompt, system, max_tokens, api_key)
+        return _chat_anthropic_async(prompt, system, max_tokens, api_key, model, cache_system)
 
 
 # ── Anthropic backend ────────────────────────────────────────────────
 
 
+def _system_param(system: str, cache_system: bool):
+    """Build the `system` kwarg for the Anthropic SDK, optionally marking
+    it as an ephemeral cache breakpoint."""
+    if system and cache_system:
+        return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    return system
+
+
 def _chat_anthropic(
-    prompt: str, system: str, max_tokens: int, api_key: str | None,
+    prompt: str,
+    system: str,
+    max_tokens: int,
+    api_key: str | None,
+    model: str | None = None,
+    cache_system: bool = False,
 ) -> dict | None:
-    """Call Claude Haiku via Anthropic API (sync)."""
+    """Call Claude via Anthropic API (sync)."""
     import anthropic
 
     key = api_key or cfg.ANTHROPIC_API_KEY
@@ -68,13 +95,13 @@ def _chat_anthropic(
         logger.warning("No Anthropic API key — skipping LLM call")
         return None
 
-    model = getattr(cfg, "LLM_MODEL", "claude-haiku-4-5-20251001")
+    resolved_model = model or getattr(cfg, "LLM_MODEL", "claude-haiku-4-5-20251001")
     try:
         client = anthropic.Anthropic(api_key=key)
         response = client.messages.create(
-            model=model,
+            model=resolved_model,
             max_tokens=max_tokens,
-            system=system,
+            system=_system_param(system, cache_system),
             messages=[{"role": "user", "content": prompt}],
         )
         result_text = response.content[0].text.strip()
@@ -85,9 +112,14 @@ def _chat_anthropic(
 
 
 async def _chat_anthropic_async(
-    prompt: str, system: str, max_tokens: int, api_key: str | None,
+    prompt: str,
+    system: str,
+    max_tokens: int,
+    api_key: str | None,
+    model: str | None = None,
+    cache_system: bool = False,
 ) -> dict | None:
-    """Call Claude Haiku via Anthropic API (async)."""
+    """Call Claude via Anthropic API (async)."""
     import anthropic
 
     key = api_key or cfg.ANTHROPIC_API_KEY
@@ -95,13 +127,13 @@ async def _chat_anthropic_async(
         logger.warning("No Anthropic API key — skipping LLM call")
         return None
 
-    model = getattr(cfg, "LLM_MODEL", "claude-haiku-4-5-20251001")
+    resolved_model = model or getattr(cfg, "LLM_MODEL", "claude-haiku-4-5-20251001")
     try:
         client = anthropic.AsyncAnthropic(api_key=key)
         response = await client.messages.create(
-            model=model,
+            model=resolved_model,
             max_tokens=max_tokens,
-            system=system,
+            system=_system_param(system, cache_system),
             messages=[{"role": "user", "content": prompt}],
         )
         result_text = response.content[0].text.strip()
