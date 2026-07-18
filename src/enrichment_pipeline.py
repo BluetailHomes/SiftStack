@@ -189,11 +189,24 @@ def _compute_mailable(notices: list[NoticeData]) -> None:
     """Set mailable flag: 'yes' if a real mailing address is present.
 
     For probate notices, the property address is frequently unknown (see
-    _filter_vacant_land) but the record is still mailable via the PR/
-    executor's own address, which notice_parser already extracts into
-    owner_street/owner_city/owner_zip from the notice text itself. Property
-    address (address/city/zip) is checked first since it's more complete
-    when present; the PR address is the fallback for probate specifically.
+    _filter_vacant_land). Two other addresses can substitute:
+      - The PR/executor's own address, extracted by notice_parser straight
+        from the notice text (owner_street/owner_city/owner_zip). Only
+        present on notice formats that name a PR with an address — "unknown
+        heirs" notices, for example, have neither (confirmed live
+        2026-07-17 against a real Jackson County MO notice).
+      - The decision-maker's address, found later by obituary_enricher's
+        heir/DM lookup (decision_maker_street/city/zip) — this is the
+        PRIMARY contact mechanism for probate per the deep-prospecting
+        pipeline, not a fallback, and is commonly the ONLY address
+        available when the notice names no PR directly (same live case:
+        a verified-living heir was identified with 100% confidence, but
+        her street address lookup hit a search-provider rate limit, so
+        checking decision_maker_street matters even when the lookup
+        partially fails).
+    Property address is checked first since it's most complete when
+    present; the two probate-specific addresses are checked in order as
+    fallbacks.
     """
     for n in notices:
         has_property_addr = bool(n.address.strip() and n.city.strip() and n.zip.strip())
@@ -201,7 +214,13 @@ def _compute_mailable(notices: list[NoticeData]) -> None:
             n.notice_type == "probate"
             and n.owner_street.strip() and n.owner_city.strip() and n.owner_zip.strip()
         )
-        n.mailable = "yes" if (has_property_addr or has_pr_addr) else ""
+        has_dm_addr = bool(
+            n.notice_type == "probate"
+            and n.decision_maker_street.strip()
+            and n.decision_maker_city.strip()
+            and n.decision_maker_zip.strip()
+        )
+        n.mailable = "yes" if (has_property_addr or has_pr_addr or has_dm_addr) else ""
 
 
 # ── Run ID ───────────────────────────────────────────────────────────
@@ -225,11 +244,17 @@ def _validate_records(notices: list[NoticeData]) -> list[NoticeData]:
     """Validate records before export. Removes invalid records and logs issues.
 
     Checks:
-      - address, city, zip must be non-empty (property address for most
-        notice types; for probate, the PR/executor's mailing address —
-        owner_street/owner_city/owner_zip — satisfies this instead, since
-        the property address is frequently never found, same reasoning as
-        _filter_vacant_land and _compute_mailable above)
+      - address, city, zip must be non-empty. For most notice types this
+        means the property address. For probate, three fallbacks are tried
+        in order — property address, then the PR/executor's mailing
+        address (owner_street/city/zip, parsed straight from the notice
+        text — absent on notice formats that name no PR, like "unknown
+        heirs" notices), then the decision-maker's address
+        (decision_maker_street/city/zip, found later by obituary_enricher's
+        heir/DM lookup — the PRIMARY probate contact mechanism, not a
+        fallback, and often the only address available when the notice
+        itself names no PR). See _compute_mailable for the same three-tier
+        reasoning.
       - address must contain at least one letter (not pure garbage OCR)
       - date fields must be valid YYYY-MM-DD format if present
     """
@@ -240,19 +265,28 @@ def _validate_records(notices: list[NoticeData]) -> list[NoticeData]:
         issues = []
 
         if n.notice_type == "probate" and not n.address.strip():
-            # No property address — fall back to validating the PR's
-            # mailing address instead of demanding a property address
-            # that's frequently never located.
-            if not n.owner_street.strip():
-                issues.append("missing address (no property or PR address)")
-            elif _GARBAGE_RE.match(n.owner_street):
-                issues.append(f"garbage PR address: {n.owner_street!r}")
+            # No property address — fall back to the PR's mailing address,
+            # then the decision-maker's, instead of demanding a property
+            # address that's frequently never located.
+            if n.owner_street.strip():
+                addr, city, zip_, label = n.owner_street, n.owner_city, n.owner_zip, "PR"
+            elif n.decision_maker_street.strip():
+                addr, city, zip_, label = (
+                    n.decision_maker_street, n.decision_maker_city, n.decision_maker_zip, "DM",
+                )
+            else:
+                addr, city, zip_, label = "", "", "", "PR/DM"
 
-            if not n.owner_city.strip():
-                issues.append("missing city (no property or PR city)")
+            if not addr.strip():
+                issues.append("missing address (no property, PR, or DM address)")
+            elif _GARBAGE_RE.match(addr):
+                issues.append(f"garbage {label} address: {addr!r}")
 
-            if not n.owner_zip.strip():
-                issues.append("missing zip (no property or PR zip)")
+            if not city.strip():
+                issues.append("missing city (no property, PR, or DM city)")
+
+            if not zip_.strip():
+                issues.append("missing zip (no property, PR, or DM zip)")
         else:
             # Required fields
             if not n.address.strip():

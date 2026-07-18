@@ -228,6 +228,26 @@ _STATE_TOKEN = (
     r"|New\s+Mexico|N\.?M\.?|NM)"
 )
 
+# Normalizes anything _STATE_TOKEN can match down to a 2-letter abbreviation.
+# Used when a state is actually captured out of notice text (e.g. PR_ADDRESS_RE)
+# rather than just matched-and-discarded — a PR's own mailing address can be
+# in a different state than the property/county being searched (confirmed
+# live 2026-07-17: a Jackson County, MO PR's business address was in
+# Overland Park, KS), so it must not be assumed to match notice.state.
+_STATE_TOKEN_TO_ABBR = {
+    "tennessee": "TN", "tenn": "TN", "tenn.": "TN", "tn": "TN",
+    "missouri": "MO", "mo": "MO", "mo.": "MO",
+    "oklahoma": "OK", "okla": "OK", "okla.": "OK", "ok": "OK",
+    "kansas": "KS", "kan": "KS", "kan.": "KS", "ks": "KS",
+    "new mexico": "NM", "n.m.": "NM", "nm": "NM", "n.m": "NM",
+}
+
+
+def _normalize_state_token(raw: str) -> str:
+    """Normalize a _STATE_TOKEN regex match to a 2-letter abbreviation."""
+    key = re.sub(r"\s+", " ", raw.strip().lower())
+    return _STATE_TOKEN_TO_ABBR.get(key, raw.strip().upper()[:2])
+
 # FULL match: indicator + address + city + [county] + state + zip
 # Captures (address, city, zip) all from the same context.
 FULL_PROPERTY_RE = re.compile(
@@ -462,25 +482,72 @@ OWNER_PATTERNS = [
 ]
 
 # Probate — personal representative / executor / administrator
+#
+# TN-style notices name the PR immediately after the title ("Personal
+# Representative: JOHN SMITH"). MO's Jackson County template (confirmed
+# live 2026-07-17 against 3 real notices, "The Pulse" / Circuit Court of
+# Jackson County) instead uses the title TWICE — first to describe the
+# *decedent's* estate ("...appointed the personal representative OF THE
+# ESTATE OF JOSEPH LEE WALKER, decedent..." — no PR name here at all, and
+# the original regex was wrongly capturing "of the estate" as if it were a
+# name), and only later gives the actual name, introduced by "The personal
+# representative's business address is:" followed by the name on its own
+# line, then the mailing address (which PR_ADDRESS_RE below already parses
+# correctly, since its flexible {3,80}-char gap happens to skip past the
+# first, name-less occurrence and land on the second).
+#
+# The negative lookahead skips the "title + of the estate of DECEDENT"
+# construction; the optional "'s (business )address is" group matches
+# MO's connector phrase before the real name. Falls through to the
+# original direct "title: NAME" capture for TN-style notices, where
+# neither of those additions consume anything.
 PROBATE_NAME_RE = re.compile(
     r"(?:Personal\s+Representative(?:\(S\))?|Executor|Executrix|Administrator|Administratrix)"
+    r"(?!\s+of\s+the\s+estate\b)"
+    r"(?:'s)?\s*(?:business\s+)?(?:address\s+is\s*)?"
     r"[:\s]+([A-Z][A-Za-z\s.]+?)(?:\s*,|\s*\(|\s+of\b|\s+for\b|\s+\d|\s*$)",
     re.IGNORECASE | re.MULTILINE,
 )
 
-# Probate — decedent name from "Estate of [NAME], Deceased"
+# Probate — decedent name from "Estate of [NAME], Deceased" or "..., Decedent."
+# MO's "Notice of Hearing-Determination of Heirship" sub-template (used for
+# unknown-heirs cases) closes with "Decedent." instead of "Deceased." —
+# confirmed live 2026-07-17; without it this regex missed the decedent name
+# entirely for that notice sub-type (LLM fallback caught it, but the regex
+# should too since LLM parsing is optional/gated on ANTHROPIC_API_KEY).
 DECEDENT_NAME_RE = re.compile(
     r"Estate\s+of\s+([A-Z][A-Za-z\s.,'\-]+?)"
-    r"(?:\s*,?\s*(?:Deceased|Dec['\u2019.]?\s*d|who\s+died))",
+    r"(?:\s*,?\s*(?:Deceased|Decedent|Dec['\u2019.]?\s*d|who\s+died))",
     re.IGNORECASE,
 )
 
-# Probate — PR mailing address (street + city + TN + zip after the PR title)
-# Anchors from the PR title keyword, skips over name/title (non-digit chars),
-# then captures: (1) street address, (2) city, (3) zip
+# Probate — PR mailing address (street + city + state + zip after the PR title)
+# Anchors from the PR title keyword, then captures: (1) the gap between the
+# title and the address (may contain the PR's name — see
+# _extract_name_from_gap, which is the primary, more reliable source for
+# owner_name on probate notices), (2) street address, (3) city, (4) state,
+# (5) zip.
+#
+# This regex's own {3,80}-char bound on the gap is what makes it reliable
+# where PROBATE_NAME_RE alone is not: a notice can mention "personal
+# representative" multiple times (once naming the DECEDENT's estate, once
+# introducing unrelated boilerplate like "the personal representative may
+# administer the estate independently...", and once actually introducing
+# the PR's name+address) — but only the real name+address occurrence has
+# an actual digit-led street address within 80 characters, so this regex
+# naturally skips the false occurrences that a name-only search can't
+# reliably distinguish. Confirmed live 2026-07-17 across 4 real Jackson
+# County, MO notices.
+#
+# State is now a CAPTURING group (was non-capturing before) — a PR's
+# mailing address is not guaranteed to be in the same state as the
+# property/county being searched. Confirmed live 2026-07-17: a Jackson
+# County, MO estate's personal representative's business address was in
+# Overland Park, KS — the next state over in the same KC metro. Callers
+# must use the captured state, not assume the notice's own county state.
 PR_ADDRESS_RE = re.compile(
     r"(?:Personal\s+Representative(?:\(S\))?|Executor|Executrix|Administrator|Administratrix)"
-    r"[^0-9]{3,80}"                   # skip PR name + optional title suffix
+    r"([^0-9]{3,80})"                  # gap between title and address — may contain the PR's name
     r"(\d{1,5}\s+"                     # house number
     r"[\w\s.,'#-]+?"                   # street name words (non-greedy)
     + _SUFFIX +
@@ -489,7 +556,7 @@ PR_ADDRESS_RE = re.compile(
     r"\s*[,.\s]+\s*"
     r"([A-Za-z][\w\s]*?)"             # city
     r"\s*[,.]\s*"
-    + _STATE_TOKEN +
+    r"(" + _STATE_TOKEN + r")"        # state — now captured, not just matched
     r"\s*[,.\s]*"
     r"(\d{5})",                        # zip
     re.IGNORECASE,
@@ -1109,12 +1176,34 @@ def _parse_name(notice: NoticeData) -> None:
                 return
 
 
+def _extract_name_from_gap(gap: str) -> str:
+    """Pull a plausible PR name out of the text between the title keyword
+    and the address that PR_ADDRESS_RE matched.
+
+    MO's template consistently places the PR's name as its own line/segment
+    immediately before the address (confirmed live 2026-07-17: "...business
+    address is: \\n\\nBARBI L. WALKER, \\n\\n1006 W. COX SCHOOL ROAD..."). The
+    gap may also contain unrelated earlier boilerplate (e.g. "of the estate
+    of DECEDENT, decedent, by the Probate Division...") when PR_ADDRESS_RE's
+    match started from an earlier, name-less "personal representative"
+    mention — so this takes the LAST non-empty segment, which is
+    structurally the piece immediately adjacent to the address regardless
+    of what came before it in the gap.
+    """
+    # Split on commas and newlines — the name is reliably set off from
+    # both the preceding boilerplate and the following address by at
+    # least one of these.
+    segments = [s.strip() for s in re.split(r"[,\n]", gap) if s.strip()]
+    return segments[-1] if segments else ""
+
+
 def _parse_pr_address(notice: NoticeData) -> None:
-    """Extract the PR's mailing address from probate notice text.
+    """Extract the PR's mailing address (and, more reliably than
+    PROBATE_NAME_RE alone, their name) from probate notice text.
 
     Probate notices contain the PR/Executor's mailing address (where creditors
     send claims), but NOT the decedent's property address. This extracts the
-    PR's street, city, state, and zip into the owner_* fields.
+    PR's name, street, city, state, and zip into the owner_* fields.
     """
     if notice.notice_type != "probate":
         return
@@ -1122,17 +1211,29 @@ def _parse_pr_address(notice: NoticeData) -> None:
     text = notice.raw_text.replace("\xa0", " ")
     match = PR_ADDRESS_RE.search(text)
     if match:
-        street = _clean_address(match.group(1))
+        gap, street_raw, city_raw, state_raw, zip_raw = match.groups()
+
+        street = _clean_address(street_raw)
         # Title-case — PR addresses in notices are usually ALL CAPS
         if street.isupper():
             street = street.title()
         notice.owner_street = street
-        notice.owner_city = _clean_city(match.group(2))
-        notice.owner_state = notice.state
-        notice.owner_zip = match.group(3)
+        notice.owner_city = _clean_city(city_raw)
+        notice.owner_state = _normalize_state_token(state_raw)
+        notice.owner_zip = zip_raw
+
+        # Name derived from the same match as the (already-trustworthy)
+        # address — see _extract_name_from_gap for why this beats an
+        # independent PROBATE_NAME_RE search when a notice mentions
+        # "personal representative" more than once.
+        name_candidate = _clean_name(_extract_name_from_gap(gap))
+        if _is_valid_name(name_candidate):
+            notice.owner_name = name_candidate
+
         logger.debug(
-            "PR address: %s, %s, %s %s",
-            notice.owner_street, notice.owner_city, notice.owner_state, notice.owner_zip,
+            "PR address: %s, %s, %s, %s %s",
+            notice.owner_name, notice.owner_street, notice.owner_city,
+            notice.owner_state, notice.owner_zip,
         )
 
 

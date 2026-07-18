@@ -85,7 +85,16 @@ SEL_PER_PAGE_DROPDOWN = 'select[name$="ddlPerPage"]'
 
 # Search results (verified on Search.aspx)
 SEL_RESULTS_GRID = "#ctl00_ContentPlaceHolder1_WSExtendedGrid1_GridView1"
-SEL_VIEW_BUTTON_PATTERN = "input[name$='btnView2'], input[name$='btnView']"
+# :visible is required — each grid row renders BOTH a visible "btnView" and
+# a hidden "btnView2" duplicate (leftover from the site's "Hide Read
+# Notices" toggle). Without :visible, query_selector_all returns 2 matches
+# per row, which silently misaligns every subsequent index against
+# scraper.py's positional view_buttons[idx] lookup — idx=1 hits row 1's
+# hidden duplicate instead of row 2, and Playwright's actionability check
+# waits forever for a hidden element to become clickable. Confirmed live
+# via tests/diag_gobacktimeout.py (2026-07-17) — this was misattributed to
+# a go_back()/bfcache issue before the actual button dump revealed it.
+SEL_VIEW_BUTTON_PATTERN = "input[name$='btnView2']:visible, input[name$='btnView']:visible"
 SEL_NEXT_PAGE_BUTTON = "#ctl00_ContentPlaceHolder1_WSExtendedGrid1_GridView1_ctl01_btnNext"
 SEL_PAGE_INFO = "table.wsResultsGrid"
 
