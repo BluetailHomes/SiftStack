@@ -305,6 +305,52 @@ STANDALONE_ADDR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ── Shared name/address noise filter ────────────────────────────────
+#
+# Both _is_valid_name() and _is_valid_address() need to reject sentence
+# fragments leaked from notice boilerplate ("Was Appointed", "For The",
+# "...Business Address And Phone Number Are:") that aren't in any bad-word
+# deny-list because they're generic prose, not a fixed phrase. This has
+# already happened twice — PROBATE_NAME_RE's original TN-only assumptions,
+# then a hand-picked deny-list that didn't anticipate MO's exact wording —
+# so instead of a third exact-phrase list, this is word-ratio based: a
+# name/address is prose, not a value, if a colon leaked in (a label, not
+# the value after it) or if most of its words are generic function words
+# or notice-process words that never dominate a real name or address.
+_NOISE_WORDS = {
+    # generic English function words — a real name/address is never
+    # mostly articles/prepositions/auxiliary verbs
+    "a", "an", "the", "and", "or", "of", "for", "to", "in", "on", "at",
+    "by", "with", "was", "were", "is", "are", "be", "been", "being",
+    "will", "shall", "must", "may", "might", "should", "would", "can",
+    "could", "not", "no", "that", "this", "these", "those", "who",
+    "which", "as",
+    # notice/legal-process boilerplate — describes the appointment
+    # process or a contact-info label, never a name or a mailing address
+    "appointed", "administer", "administered", "independently",
+    "adjudication", "estate", "business", "address", "phone", "number",
+}
+
+
+def _looks_like_prose_fragment(text: str) -> bool:
+    """True if `text` reads like a leaked sentence fragment from notice
+    boilerplate rather than an actual name/address value.
+
+    Shared by _is_valid_name() and _is_valid_address() so a new county's
+    wording only needs the word list updated once, not two deny-lists.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return True
+    if ":" in stripped:
+        return True
+    words = re.findall(r"[A-Za-z']+", stripped)
+    if not words:
+        return False
+    noise_hits = sum(1 for w in words if w.lower() in _NOISE_WORDS)
+    return noise_hits / len(words) >= 0.5
+
+
 # ── Address validation ───────────────────────────────────────────────
 
 # Words that indicate the address is a courthouse / auction location / office
@@ -347,6 +393,11 @@ def _is_valid_address(addr: str) -> bool:
     for bad_addr in _KNOWN_BAD_ADDRS:
         if normalized.startswith(bad_addr):
             return False
+
+    # Reject prose fragments (e.g. "For The") that aren't in the deny-lists
+    # above because they're generic boilerplate, not a fixed bad phrase.
+    if _looks_like_prose_fragment(addr):
+        return False
 
     # House number sanity: must be 1-99999
     m = re.match(r"(\d+)", addr)
@@ -571,6 +622,11 @@ _INVALID_NAMES = {
     "all persons", "unknown heirs", "you in the", "you and",
     "the cause", "the following", "the undersigned",
     "executed a deed", "executed a d", "default having",
+    # MO probate boilerplate (confirmed live 2026-07-18 across Jackson/Clay
+    # County notices) — also covered by _looks_like_prose_fragment()'s
+    # general ratio check below, kept here too as an exact, zero-risk match.
+    "was appointed", "may administer the estate independently",
+    "business address and phone number", "are:",
 }
 
 
@@ -583,6 +639,11 @@ def _is_valid_name(name: str) -> bool:
         if lower.startswith(bad):
             return False
     if len(name) > 80 or len(name) < 3:
+        return False
+    # Generic fallback for boilerplate phrases not in the exact-match list
+    # above — see _looks_like_prose_fragment() for why this is word-ratio
+    # based instead of another hardcoded phrase.
+    if _looks_like_prose_fragment(name):
         return False
     return True
 

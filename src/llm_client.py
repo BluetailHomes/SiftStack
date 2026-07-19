@@ -96,6 +96,7 @@ def _chat_anthropic(
         return None
 
     resolved_model = model or getattr(cfg, "LLM_MODEL", "claude-haiku-4-5-20251001")
+    logger.debug("Anthropic call using model=%s", resolved_model)
     try:
         client = anthropic.Anthropic(api_key=key)
         response = client.messages.create(
@@ -128,6 +129,7 @@ async def _chat_anthropic_async(
         return None
 
     resolved_model = model or getattr(cfg, "LLM_MODEL", "claude-haiku-4-5-20251001")
+    logger.debug("Anthropic async call using model=%s", resolved_model)
     try:
         client = anthropic.AsyncAnthropic(api_key=key)
         response = await client.messages.create(
