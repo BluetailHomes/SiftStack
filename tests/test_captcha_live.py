@@ -26,7 +26,7 @@ from config import (
     NOTICE_SITE_PASSWORD,
     CAPTCHA_API_KEY,
 )
-from captcha_solver import detect_captcha, solve_captcha_and_view
+from captcha_solver import solve_captcha_and_view
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,20 +95,13 @@ async def main():
 
         logger.info("On notice page: %s", page.url)
 
-        # ── Step 4: Check for CAPTCHA ──────────────────────────────
-        has_captcha = await detect_captcha(page)
-        logger.info("Step 4: CAPTCHA detected: %s", has_captcha)
-
-        if not has_captcha:
-            logger.warning("No CAPTCHA found — maybe already solved?")
-            body = await page.inner_text("body")
-            logger.info("Page text (first 500 chars): %s", body[:500])
-            await browser.close()
-            return
-
-        # ── Step 5: Solve CAPTCHA ──────────────────────────────────
-        logger.info("Step 5: Solving reCAPTCHA via 2Captcha...")
-        logger.info("This will take ~10-30 seconds...")
+        # ── Step 4: Detect + solve CAPTCHA (if any) ─────────────────
+        # solve_captcha_and_view() handles detection internally — it
+        # returns True immediately if notice content is already visible,
+        # otherwise detects the provider (Turnstile or reCAPTCHA) and
+        # solves it via 2Captcha.
+        logger.info("Step 4: Detecting + solving CAPTCHA via 2Captcha...")
+        logger.info("This will take ~10-30 seconds if a CAPTCHA is present...")
 
         success = await solve_captcha_and_view(page)
 
