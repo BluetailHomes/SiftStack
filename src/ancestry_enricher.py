@@ -195,7 +195,21 @@ async def _auto_login(page) -> bool:
         logger.error("Cannot find sign-in button")
         return False
 
-    await _delay(3, 5)
+    # Wait for the post-submit redirect rather than guessing a fixed delay.
+    # A real login can take longer than a few seconds (confirmed live
+    # 2026-07-21: the "Sign in" button sits in its loading-spinner state
+    # for several seconds before redirecting — see tests/diag_ancestry_login.py,
+    # which hit a false "Login failed" from a flat 3-5s sleep, vs
+    # diag_ancestry_login3.py, which found the session already valid
+    # moments later). wait_for_url with a predicate returns as soon as the
+    # redirect actually completes instead of always paying the worst case.
+    from playwright.async_api import TimeoutError as PwTimeout
+    try:
+        await page.wait_for_url(lambda url: "signin" not in url.lower(), timeout=15000)
+    except PwTimeout:
+        pass  # fall through — the signin-URL check below reports the failure
+
+    await _delay(1, 2)  # let the landed page settle before reading state
 
     if await _check_blocked(page):
         return False
