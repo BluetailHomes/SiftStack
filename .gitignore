@@ -69,3 +69,4 @@ autoresearch/
 /*.csv
 /probate-market-research.md
 tests/diag_*.png
+tests/diag_output/

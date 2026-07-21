@@ -4,7 +4,9 @@
 # if imported. Run them directly instead, e.g.:
 #   python tests/test_e2e_obituary.py
 #   python tests/test_entity_researcher.py
+#   python tests/test_e2e_family_tree.py
 collect_ignore = [
     "test_e2e_obituary.py",
     "test_entity_researcher.py",
+    "test_e2e_family_tree.py",
 ]

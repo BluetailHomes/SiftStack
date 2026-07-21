@@ -901,25 +901,272 @@ async def _parse_obituary_results(page) -> list[dict]:
 
 # ── Search: Family trees ────────────────────────────────────────────
 
+# Maximum year gap between a tree candidate's recorded death year and the
+# already-confirmed death year (from SSDI/obituary/newspapers) to accept
+# it as the same person. Tighter than obituary_enricher's MAX_DOD_GAP_YEARS
+# (3 years, which compares a death date to a *filing* date that can
+# legitimately lag by 1-2 years) — here both years describe the *same*
+# death event from two independent sources, so they should agree almost
+# exactly. 1 year of slack covers a death in late December landing in
+# different years across sources due to reporting/timezone quirks.
+MAX_TREE_DEATH_YEAR_GAP = 1
 
-async def _search_family_trees(page, first_name: str, last_name: str) -> list[dict]:
-    """Search family trees for heir identification. Returns list of family members."""
+
+async def _search_family_trees(
+    page,
+    first_name: str,
+    last_name: str,
+    expected_death_date: str = "",
+    state: str = "TN",
+    city: str = "",
+    middle_initial: str = "",
+) -> list[dict]:
+    """Search Ancestry public member trees for a deceased person's family.
+
+    Returns a list of {name, relationship} dicts — the same shape
+    _parse_obituary_results() already produces for the spouse it extracts
+    from obituary cards — covering parents, siblings, spouse, and
+    children when present.
+
+    Two-step process, mirroring the SSDI/obituary tiers: search the
+    People tab (search URL param types=t — NOT the old treesTypes=on
+    param, which now silently redirects to the plain Records tab) for
+    name matches, score candidates against the already-confirmed death
+    year to reject same-name/wrong-person trees (see
+    MAX_TREE_DEATH_YEAR_GAP), then open only the single best-scoring
+    profile to read its Relationships panel. Scoring from the results
+    list first (rather than opening every candidate's profile) keeps
+    this to 2 page loads per lookup, same order as the other tiers.
+    """
     if not _can_load_page() or _circuit_broken:
         return []
 
-    # Navigate to family tree search
-    tree_url = f"{ANCESTRY_URL}/search/?name={first_name}+{last_name}&treesTypes=on"
-    await page.goto(tree_url, wait_until="domcontentloaded")
+    import urllib.parse
+
+    params = {"name": f"{first_name} {last_name}", "searchMode": "simple", "types": "t"}
+    search_url = f"{ANCESTRY_URL}/search?" + urllib.parse.urlencode(params)
+    logger.debug("Family tree search URL: %s", search_url)
+
+    await page.goto(search_url, wait_until="domcontentloaded")
     _increment_page_loads()
-    await _delay(3, 5)
+
+    try:
+        await page.wait_for_selector('[data-testid="person-results-list"]', timeout=10000)
+    except Exception:
+        pass
+    await _delay(2, 4)
 
     if await _check_blocked(page):
         return []
 
-    # TODO: Parse family tree results — need to discover selectors
-    # For now, return empty (family tree parsing is Phase 2)
-    logger.debug("Family tree search not yet implemented")
-    return []
+    candidates = await _parse_tree_search_results(page)
+    if not candidates:
+        logger.debug("Family tree search: no results for %s %s", first_name, last_name)
+        return []
+
+    expected_year = 0
+    if expected_death_date:
+        m = re.search(r"\d{4}", expected_death_date)
+        if m:
+            expected_year = int(m.group())
+
+    scored = []
+    for c in candidates:
+        if not _name_matches(first_name, last_name, c.get("name", ""), middle_initial):
+            continue
+
+        death_text = c.get("death", "")
+        death_year = 0
+        if death_text:
+            m = re.search(r"\d{4}", death_text)
+            if m:
+                death_year = int(m.group())
+
+        # Hard reject: both sides have a death year and they disagree by
+        # more than the tolerance — almost certainly a different person
+        # who happens to share this (often common) name.
+        if expected_year and death_year and abs(death_year - expected_year) > MAX_TREE_DEATH_YEAR_GAP:
+            logger.debug("Tree skip (death year %d != expected %d): %s",
+                         death_year, expected_year, c.get("name"))
+            continue
+
+        loc_text = f"{c.get('birth', '')} {death_text}"
+        loc_ok, loc_score = _location_matches(loc_text, state, city)
+        if not loc_ok:
+            continue
+
+        year_match_bonus = 1 if (expected_year and death_year == expected_year) else 0
+        composite = loc_score * 10000 + year_match_bonus * 100
+        scored.append((composite, loc_score, year_match_bonus, c))
+
+    if not scored:
+        logger.debug("Family tree search: no quality matches for %s %s", first_name, last_name)
+        return []
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    _, best_loc_score, best_year_bonus, best = scored[0]
+
+    # Ambiguity guard, same shape as the SSDI/obituary tiers: multiple
+    # candidates with neither a county-level location match nor a
+    # confirmed death-year match is too risky for a name this common.
+    if len(scored) > 1 and best_loc_score < 2 and not best_year_bonus:
+        logger.info("Family tree: %d ambiguous matches for %s %s — skipping (no location or year match)",
+                     len(scored), first_name, last_name)
+        return []
+
+    profile_url = best.get("profile_url", "")
+    if not profile_url:
+        return []
+
+    logger.info("Family tree match: %s (tree: %s, loc_score=%d, year_match=%s)",
+                 best.get("name"), best.get("tree_name", ""), best_loc_score, bool(best_year_bonus))
+
+    await page.goto(profile_url, wait_until="domcontentloaded")
+    _increment_page_loads()
+    await _delay(2, 4)
+
+    if await _check_blocked(page):
+        return []
+
+    # Siblings are collapsed by default — expand before reading the DOM
+    # so _parse_family_tree_profile() actually finds them.
+    sib_btn = await page.query_selector("#toggleSiblingsBtn")
+    if sib_btn:
+        expanded = await sib_btn.get_attribute("aria-expanded")
+        if expanded != "true":
+            try:
+                await sib_btn.click()
+                await _delay(1, 2)
+            except Exception:
+                pass
+
+    members = await _parse_family_tree_profile(page)
+    logger.info("Family tree: extracted %d family member(s) for %s", len(members), best.get("name"))
+    return members
+
+
+async def _parse_tree_search_results(page) -> list[dict]:
+    """Parse the Ancestry People-tab (types=t) search results list.
+
+    Each result card (data-testid="personResult") has a name + profile
+    link, a small Birth/Death fields table, and a "Found in <tree>" link.
+    This reads the results list only — no profile pages are opened here,
+    so scoring/filtering happens before spending a page load on any one
+    candidate's profile.
+
+    Verified live 2026-07-21 against real search results (see
+    tests/diag_ancestry_people_tab.py) — data-testid attributes, not
+    guessed classes, so this should be stable across Ancestry's routine
+    CSS/class churn.
+    """
+    try:
+        data = await page.evaluate("""() => {
+            const cards = document.querySelectorAll('[data-testid="personResult"]');
+            const results = [];
+            for (const card of cards) {
+                const nameEl = card.querySelector('[data-testid="personResultTitleLink"]');
+                if (!nameEl) continue;
+                const r = {
+                    name: (nameEl.textContent || '').trim(),
+                    profile_url: nameEl.href,
+                };
+                const rows = card.querySelectorAll('tr.personField');
+                for (const row of rows) {
+                    const label = (row.querySelector('.rowLabel')?.textContent || '').trim().toLowerCase();
+                    const val = (row.querySelector('.textWrap')?.textContent || '').trim();
+                    if (label === 'birth') r.birth = val;
+                    if (label === 'death') r.death = val;
+                }
+                const treeLink = card.querySelector('[data-testid="clusterProfileLink"]');
+                if (treeLink) r.tree_name = (treeLink.textContent || '').trim();
+                if (r.name) results.push(r);
+            }
+            return results.slice(0, 20);
+        }""")
+        return data or []
+    except Exception as e:
+        logger.debug("Family tree result parsing error: %s", e)
+        return []
+
+
+async def _parse_family_tree_profile(page) -> list[dict]:
+    """Parse the Relationships panel on an Ancestry tree person page.
+
+    Structure confirmed via live DOM inspection on 2026-07-21 against two
+    real public-tree profiles ("Daniel Williams Jackson Jr" and "Daniel
+    Williams Carlton" — see tests/diag_ancestry_tree_profile*.py):
+
+        <section id="familySection">
+          <h3 id="conTitleFamily">Parents</h3>
+          <ul class="researchList parents">
+            <li><a class="card" data-automation="Full Name">
+                  ...<p class="userCardSubTitle">1924-1996</p>
+            </a></li>
+          </ul>
+          <h3><button id="toggleSiblingsBtn" aria-expanded="...">Siblings</button></h3>
+          <div id="toggleSiblingsFacts"><ul class="researchList">...</ul></div>
+          <h3>Spouse</h3>
+          <ul class="researchList">...</ul>
+        </section>
+
+    Each relationship section is an <h3> label immediately followed by
+    its <ul class="researchList"> — except Siblings, which starts
+    collapsed and wraps its <ul> in a <div id="toggleSiblingsFacts">
+    (the caller must click #toggleSiblingsBtn before calling this, or
+    the siblings list will be empty). Walking by heading text rather
+    than hardcoding 3 fixed selectors means a "Children" section — which
+    neither live test profile had, so its exact markup is UNVERIFIED —
+    is picked up automatically if present, since Ancestry renders every
+    relationship type through the same shared person-card component
+    (confirmed identical for Parents/Siblings/Spouse: same
+    `a.card[data-automation]` structure in all three).
+
+    Redacted family members render as data-automation="Private" with no
+    <img> (just a generic iconMale/iconFemale placeholder) — these carry
+    no identifying information and are dropped rather than stored as a
+    literal name "Private".
+    """
+    try:
+        data = await page.evaluate("""() => {
+            const section = document.querySelector('#familySection');
+            if (!section) return [];
+
+            const relationshipMap = {
+                'parents': 'parent',
+                'siblings': 'sibling',
+                'spouse': 'spouse',
+                'children': 'child',
+            };
+
+            const members = [];
+            const headings = section.querySelectorAll('h3');
+            for (const h of headings) {
+                const label = (h.textContent || '').trim().toLowerCase();
+                if (!label) continue;
+                const relationship = relationshipMap[label] || label;
+
+                // The member list is the heading's next sibling <ul> —
+                // except Siblings, whose next sibling is a <div> wrapper
+                // (collapsible section) containing the <ul> instead.
+                let container = h.nextElementSibling;
+                if (container && container.tagName === 'DIV') {
+                    container = container.querySelector('ul');
+                }
+                if (!container || container.tagName !== 'UL') continue;
+
+                const cards = container.querySelectorAll('a.card[data-automation]');
+                for (const card of cards) {
+                    const name = (card.getAttribute('data-automation') || '').trim();
+                    if (!name || name === 'Private') continue;
+                    members.push({ name, relationship });
+                }
+            }
+            return members;
+        }""")
+        return data or []
+    except Exception as e:
+        logger.debug("Family tree profile parsing error: %s", e)
+        return []
 
 
 # ── Result parsing ──────────────────────────────────────────────────
@@ -1166,13 +1413,17 @@ async def lookup_deceased(
       2. Ancestry obituary collection (Death category 34)
       3. Newspapers.com obituary index (930M+ pages, shares All-Access SSO)
 
+    Once any tier confirms the death, a family-tree search (_search_family_trees)
+    runs once to supplement family_members with parents/siblings/children —
+    beyond the spouse-only data the obituary tier can extract via regex.
+
     Returns dict with keys:
       confirmed_deceased: bool
       date_of_death: str
       source_url: str
       source_type: "ssdi" | "obituary_collection" | "newspapers"
       full_name: str
-      family_members: list[dict]  (empty for now)
+      family_members: list[dict]  ({name, relationship} — parent/sibling/spouse/child)
       obituary_text: str | None
     """
     if _circuit_broken or not _can_load_page():
@@ -1188,26 +1439,51 @@ async def lookup_deceased(
     mi_label = f" {middle_initial}." if middle_initial else ""
     logger.info("Ancestry SSDI search: %s%s %s", first_name, mi_label, last_name)
     result = await _search_ssdi(page, first_name, last_name, state, middle_initial, city)
-    if result:
-        return result
-
-    await _delay(2, 4)  # Extra delay between tiers
 
     # Tier 2: Obituary collection
-    if _can_load_page() and not _circuit_broken:
+    if not result and _can_load_page() and not _circuit_broken:
+        await _delay(2, 4)  # Extra delay between tiers
         logger.info("Ancestry obituary search: %s %s", first_name, last_name)
         result = await _search_obituaries(page, first_name, last_name, state, city, middle_initial)
-        if result:
-            return result
-
-    await _delay(2, 4)
 
     # Tier 3: Newspapers.com obituary index (shares All-Access SSO)
-    if _can_load_page() and not _circuit_broken:
+    if not result and _can_load_page() and not _circuit_broken:
+        await _delay(2, 4)
         logger.info("Newspapers.com obituary search: %s %s", first_name, last_name)
         result = await _search_newspapers(page, first_name, last_name, state, city, middle_initial)
-        if result:
-            return result
 
-    logger.debug("Ancestry: no match for %s %s", first_name, last_name)
-    return None
+    if not result:
+        logger.debug("Ancestry: no match for %s %s", first_name, last_name)
+        return None
+
+    # Family tree supplement — runs once, after whichever tier confirmed
+    # the death, since family relationships aren't tied to a specific
+    # death-record source (SSDI/newspapers never populate family_members
+    # at all; the obituary tier only gets a spouse, from a regex on the
+    # obituary card — see _parse_obituary_results()). The tree search's
+    # own death-year cross-check (MAX_TREE_DEATH_YEAR_GAP) is the false-
+    # match guard here, the same role MAX_DOD_GAP_YEARS plays for
+    # obituary matches in obituary_enricher.py.
+    if _can_load_page() and not _circuit_broken:
+        await _delay(2, 4)
+        tree_first, _, tree_last = _parse_owner_name(result.get("full_name") or name)
+        if tree_first and tree_last:
+            logger.info("Ancestry family tree search: %s %s", tree_first, tree_last)
+            tree_members = await _search_family_trees(
+                page, tree_first, tree_last,
+                expected_death_date=result.get("date_of_death", ""),
+                state=state, city=city, middle_initial=middle_initial,
+            )
+            if tree_members:
+                existing = result.get("family_members") or []
+                existing_names = {
+                    fm.get("name", "").strip().lower() for fm in existing if fm.get("name")
+                }
+                for fm in tree_members:
+                    key = fm.get("name", "").strip().lower()
+                    if key and key not in existing_names:
+                        existing.append(fm)
+                        existing_names.add(key)
+                result["family_members"] = existing
+
+    return result
