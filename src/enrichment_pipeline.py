@@ -269,24 +269,40 @@ def _validate_records(notices: list[NoticeData]) -> list[NoticeData]:
             # then the decision-maker's, instead of demanding a property
             # address that's frequently never located.
             if n.owner_street.strip():
-                addr, city, zip_, label = n.owner_street, n.owner_city, n.owner_zip, "PR"
+                addr, label = n.owner_street, "PR"
+                city_attr, state_attr = "owner_city", "owner_state"
             elif n.decision_maker_street.strip():
-                addr, city, zip_, label = (
-                    n.decision_maker_street, n.decision_maker_city, n.decision_maker_zip, "DM",
-                )
+                addr, label = n.decision_maker_street, "DM"
+                city_attr, state_attr = "decision_maker_city", "decision_maker_state"
             else:
-                addr, city, zip_, label = "", "", "", "PR/DM"
+                addr, label, city_attr, state_attr = "", "PR/DM", None, None
 
             if not addr.strip():
                 issues.append("missing address (no property, PR, or DM address)")
             elif _GARBAGE_RE.match(addr):
                 issues.append(f"garbage {label} address: {addr!r}")
-
-            if not city.strip():
-                issues.append("missing city (no property, PR, or DM city)")
-
-            if not zip_.strip():
-                issues.append("missing zip (no property, PR, or DM zip)")
+            elif city_attr and not getattr(n, city_attr).strip():
+                # A real street/PO Box exists but the notice didn't restate
+                # city/state (common — e.g. "P.O. Box 53578, Albuquerque,
+                # NM 87153" IS restated and extracts fine, but some notices
+                # only give "at the address listed below" with no city).
+                # Default from the county's known major_city/state rather
+                # than rejecting an otherwise-mailable address — confirmed
+                # live 2026-07-22 against real NM probate notices. zip is
+                # no longer required in this fallback: street (or PO Box)
+                # + a defaulted city/state is enough to be mailable, and
+                # Smarty (Step 6, if configured) can complete/validate the
+                # zip separately — see standardize_owner_addresses().
+                profile = config.COUNTIES.get(n.county.strip().lower())
+                if profile:
+                    setattr(n, city_attr, profile.major_city)
+                    if state_attr and not getattr(n, state_attr).strip():
+                        setattr(n, state_attr, profile.state)
+                else:
+                    issues.append(
+                        f"missing {label} city and county {n.county!r} not in "
+                        f"registry to default from"
+                    )
         else:
             # Required fields
             if not n.address.strip():
@@ -507,6 +523,23 @@ def run_enrichment_pipeline(
                 )
             except Exception as e:
                 logger.warning("  Smarty standardization failed: %s", e)
+
+            # Probate PR/DM mailing addresses that have a street but no
+            # full city/zip (the notice didn't restate it) — a known
+            # county + partial street is exactly what Smarty can complete.
+            # Runs before Step 9b's county-major_city fallback, so a real
+            # Smarty-confirmed city/zip wins over the coarser default when
+            # available.
+            try:
+                from address_standardizer import standardize_owner_addresses
+
+                standardize_owner_addresses(
+                    notices, config.SMARTY_AUTH_ID, config.SMARTY_AUTH_TOKEN
+                )
+            except ImportError:
+                pass  # already warned above if the SDK itself is missing
+            except Exception as e:
+                logger.warning("  Smarty owner-address standardization failed: %s", e)
         else:
             logger.info("── Step 6: Smarty (no API keys configured) ──")
     elif opts.has_smarty:

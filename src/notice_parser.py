@@ -899,6 +899,22 @@ async def parse_notice_page(
     if notice_type != "probate":
         _parse_auction_date(notice)
 
+    # For probate, skip the LLM fallback entirely on notices that don't
+    # even look like a real estate-administration filing — e.g. NM's
+    # "probate" saved search matches loosely and pulls in city council
+    # agendas, civil suits, and storage auctions (confirmed live
+    # 2026-07-22), each of which would otherwise cost a real LLM call for
+    # nothing. is_valid_probate() is checked again post-parse in
+    # scraper.py (defense in depth, same pattern as is_valid_foreclosure),
+    # but skipping the LLM call here is where the actual cost is saved.
+    # Local import to avoid a circular import (probate_filter imports
+    # NoticeData from this module).
+    if notice_type == "probate":
+        from probate_filter import is_valid_probate
+        if not is_valid_probate(notice):
+            logger.debug("Skipping LLM fallback — not a real probate notice: %s", notice.source_url)
+            return notice
+
     # ── LLM fallback for missing fields ──────────────────────────
     needs_llm = (
         (notice_type == "probate" and (not notice.owner_name or not notice.decedent_name or not notice.owner_street))

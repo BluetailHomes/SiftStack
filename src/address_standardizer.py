@@ -186,6 +186,127 @@ def standardize_addresses(
     return notices
 
 
+def standardize_owner_addresses(
+    notices: list[NoticeData],
+    auth_id: str,
+    auth_token: str,
+) -> list[NoticeData]:
+    """Complete/validate PR or decision-maker mailing addresses via Smarty.
+
+    Unlike standardize_addresses() (property address), this targets
+    probate records that have a PR/DM street or PO Box but didn't get a
+    full city/zip from the notice text itself — a known county + partial
+    street is exactly what Smarty's address completion is built for,
+    unlike a fully missing address (which needs a DM/heir lookup instead,
+    see obituary_enricher.py — not something Smarty can help with).
+
+    Only completes city/zip; never invents a street that wasn't extracted.
+    Modifies notices in-place. Untested against live Smarty credentials as
+    of 2026-07-22 (none configured in the environment this was written
+    in) — mirrors standardize_addresses()'s already-verified request/
+    response handling and state-safety check closely to minimize risk,
+    but treat as unverified until run against a real account.
+    """
+    if not auth_id or not auth_token:
+        logger.info("Smarty credentials not configured -- skipping owner address standardization")
+        return notices
+
+    # Eligible: probate, no property address, has a PR or DM street but
+    # is missing city or zip on whichever one it has.
+    targets: list[tuple[int, NoticeData, str, str, str]] = []  # (idx, notice, street_attr, city_attr, zip_attr)
+    for i, n in enumerate(notices):
+        if n.notice_type != "probate" or n.address.strip():
+            continue
+        if n.owner_street.strip() and (not n.owner_city.strip() or not n.owner_zip.strip()):
+            targets.append((i, n, "owner_street", "owner_city", "owner_zip"))
+        elif n.decision_maker_street.strip() and (
+            not n.decision_maker_city.strip() or not n.decision_maker_zip.strip()
+        ):
+            targets.append((i, n, "decision_maker_street", "decision_maker_city", "decision_maker_zip"))
+
+    if not targets:
+        logger.info("No probate notices with a partial PR/DM address to standardize")
+        return notices
+
+    logger.info("Standardizing %d PR/DM addresses via Smarty", len(targets))
+
+    try:
+        client = _build_client(auth_id, auth_token)
+    except Exception as e:
+        logger.error("Failed to build Smarty client: %s", e)
+        return notices
+
+    matched = 0
+    failed = 0
+
+    for batch_start in range(0, len(targets), MAX_BATCH_SIZE):
+        batch_slice = targets[batch_start : batch_start + MAX_BATCH_SIZE]
+        batch = Batch()
+
+        for list_idx, (orig_idx, n, street_attr, city_attr, _zip_attr) in enumerate(batch_slice):
+            lookup = StreetLookup()
+            lookup.street = getattr(n, street_attr)
+            # Lastline hint: whatever city/state we already have (possibly
+            # just the county-defaulted major_city from _validate_records)
+            city = getattr(n, city_attr)
+            state = n.owner_state if street_attr == "owner_street" else n.decision_maker_state
+            lastline_parts = [p for p in (city, state or n.state) if p]
+            lookup.lastline = ", ".join(lastline_parts)
+            lookup.candidates = 1
+            lookup.match = MatchType.INVALID
+            lookup.input_id = str(list_idx)
+            batch.add(lookup)
+
+        try:
+            client.send_batch(batch)
+        except exceptions.SmartyException as e:
+            logger.error("Smarty batch API error (owner address): %s", e)
+            failed += len(batch_slice)
+            continue
+        except Exception as e:
+            logger.error("Unexpected Smarty error (owner address): %s", e)
+            failed += len(batch_slice)
+            continue
+
+        for lookup in batch:
+            candidates = lookup.result
+            if not candidates:
+                failed += 1
+                continue
+
+            candidate = candidates[0]
+            list_idx = int(lookup.input_id)
+            orig_idx, n, street_attr, city_attr, zip_attr = batch_slice[list_idx]
+            components = candidate.components
+
+            expected_state = n.owner_state if street_attr == "owner_street" else n.decision_maker_state
+            if (
+                components and components.state_abbreviation
+                and expected_state and components.state_abbreviation != expected_state
+            ):
+                logger.warning(
+                    "Smarty returned %s for owner/DM address '%s' (expected %s) -- keeping original",
+                    components.state_abbreviation, getattr(n, street_attr), expected_state,
+                )
+                failed += 1
+                continue
+
+            if components:
+                if components.city_name:
+                    setattr(n, city_attr, components.city_name)
+                if components.zipcode:
+                    setattr(n, zip_attr, components.zipcode)
+
+            matched += 1
+
+    logger.info(
+        "Smarty owner-address standardization complete: %d matched, %d failed/no-match",
+        matched, failed,
+    )
+
+    return notices
+
+
 def _reverse_geocode(lat: str, lon: str) -> dict | None:
     """Reverse geocode lat/lon via Nominatim to get city and ZIP.
 
