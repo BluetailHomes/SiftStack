@@ -34,13 +34,58 @@ DROPBOX_STORAGE_WARN_PERCENT = 80  # warn when storage usage exceeds this %
 OUTPUT_DIR.mkdir(exist_ok=True)
 LOG_DIR.mkdir(exist_ok=True)
 
+# ── Notice Platform Registry ─────────────────────────────────────────
+# All notice-site vendors this codebase knows about, keyed by the value
+# NOTICE_PLATFORM (below) selects between. Defined before "Credentials"
+# below so per-platform credential env var names can be derived from it;
+# COUNTIES further down documents what each key means for scraper.py
+# compatibility.
+NOTICE_PLATFORMS: dict[str, str] = {
+    "mopublicnotices": "https://www.mopublicnotices.com",
+    "newmexicopublicnotices": "https://www.newmexicopublicnotices.com",
+    "oklahomanotices": "https://www.oklahomanotices.com",
+    "kansaspublicnotices": "https://www.kansaspublicnotices.com",
+    "tnpublicnotice": "https://www.tnpublicnotice.com",
+}
+
+# One platform per run (see CLAUDE.md "Markets & Data Sources" — separate
+# scheduled runs per platform, not multi-platform-in-one-run). Defaults to
+# "mopublicnotices" for backward compatibility with existing .env/Actor
+# configs that predate this variable. main.py cross-checks the counties
+# selected for a run against this value (see _filter_searches_by_platform)
+# rather than silently pointing a run at the wrong site if someone mixes
+# counties from two platforms in one invocation.
+NOTICE_PLATFORM = os.getenv("NOTICE_PLATFORM", "mopublicnotices").strip().lower()
+if NOTICE_PLATFORM not in NOTICE_PLATFORMS:
+    raise ValueError(
+        f"NOTICE_PLATFORM={NOTICE_PLATFORM!r} is not a known platform — "
+        f"must be one of {sorted(NOTICE_PLATFORMS)}"
+    )
+BASE_URL = NOTICE_PLATFORMS[NOTICE_PLATFORM]
+LOGIN_URL = f"{BASE_URL}/authenticate.aspx"
+SMART_SEARCH_URL = f"{BASE_URL}/SmartSearch/Default.aspx"
+
 # ── Credentials ────────────────────────────────────────────────────────
 # NOTICE_SITE_EMAIL/PASSWORD log in to whichever public-notice platform is
-# active (see COUNTIES below) — currently mopublicnotices.com for the live
-# Missouri counties. Falls back to the legacy TNPN_* env var names for
-# backwards compatibility with .env files that haven't been migrated yet.
-NOTICE_SITE_EMAIL = os.getenv("NOTICE_SITE_EMAIL", os.getenv("TNPN_EMAIL", ""))
-NOTICE_SITE_PASSWORD = os.getenv("NOTICE_SITE_PASSWORD", os.getenv("TNPN_PASSWORD", ""))
+# active (NOTICE_PLATFORM above). Resolution order lets one .env hold
+# credentials for multiple platforms without them overwriting each other —
+# NOTICE_PLATFORM picks which pair a given run actually uses:
+#   1. Platform-specific override, e.g. NEWMEXICOPUBLICNOTICES_EMAIL/
+#      _PASSWORD — the uppercased NOTICE_PLATFORMS key exactly, no
+#      abbreviation, so OK/KS get this for free when they go live.
+#   2. Generic NOTICE_SITE_EMAIL/PASSWORD — single-platform setups that
+#      don't need per-platform separation.
+#   3. Legacy TNPN_EMAIL/PASSWORD — backwards compat with .env files from
+#      before this platform system existed.
+_platform_env_prefix = NOTICE_PLATFORM.upper()
+NOTICE_SITE_EMAIL = os.getenv(
+    f"{_platform_env_prefix}_EMAIL",
+    os.getenv("NOTICE_SITE_EMAIL", os.getenv("TNPN_EMAIL", "")),
+)
+NOTICE_SITE_PASSWORD = os.getenv(
+    f"{_platform_env_prefix}_PASSWORD",
+    os.getenv("NOTICE_SITE_PASSWORD", os.getenv("TNPN_PASSWORD", "")),
+)
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "")  # 2Captcha API key
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")  # Claude Haiku for LLM parsing
 SMARTY_AUTH_ID = os.getenv("SMARTY_AUTH_ID", "")        # Smarty address standardization
@@ -93,11 +138,6 @@ LLM_MODELS = {
     "situation_summary": "claude-haiku-4-5-20251001",
 }
 
-# ── Site URLs ──────────────────────────────────────────────────────────
-BASE_URL = "https://www.mopublicnotices.com"
-LOGIN_URL = f"{BASE_URL}/authenticate.aspx"
-SMART_SEARCH_URL = f"{BASE_URL}/SmartSearch/Default.aspx"
-
 # ── ASP.NET Selectors ─────────────────────────────────────────────────
 # Login form (verified on authenticate.aspx)
 SEL_LOGIN_EMAIL = "#ctl00_ContentPlaceHolder1_AuthenticateIPA1_txtEmailAddress"
@@ -105,7 +145,13 @@ SEL_LOGIN_PASSWORD = "#ctl00_ContentPlaceHolder1_AuthenticateIPA1_txtPassword"
 SEL_LOGIN_SUBMIT = "#ctl00_ContentPlaceHolder1_AuthenticateIPA1_btnAuth"
 
 # Smart Search dashboard / saved searches
-SEL_SAVED_SEARCHES_DROPDOWN = "#ctl00_as1_ddlSavedSearches"
+# Suffix match (not exact ID) — MO's real ID is "ctl00_as1_ddlSavedSearches"
+# but NM's is "ctl00_ContentPlaceHolder1_as1_ddlSavedSearches" (confirmed
+# live 2026-07-22, tests/diag_nm_search_form.py). Same vendor platform,
+# different master-page ContentPlaceHolder nesting per site — an exact-ID
+# selector silently breaks cross-site even though the URL paths and login
+# form field IDs match exactly. Suffix match is safe for both.
+SEL_SAVED_SEARCHES_DROPDOWN = "[id$='_ddlSavedSearches']"
 SEL_PER_PAGE_DROPDOWN = 'select[name$="ddlPerPage"]'
 
 # Search results (verified on Search.aspx)
@@ -188,7 +234,7 @@ class CountyProfile:
     county: str            # "Jackson"
     state: str              # "MO" — 2-letter USPS abbreviation
     state_full: str         # "Missouri" — for search queries/regexes that need the full name
-    notice_platform: str    # key into NOTICE_PLATFORMS below
+    notice_platform: str    # key into NOTICE_PLATFORMS (see "Notice Platform Registry" above)
     scraper_ready: bool     # True only if the current Playwright automation can drive this platform
     major_city: str         # county seat / primary city, used as a city-fallback match
     zip_prefixes: list[str] # approximate 3-digit ZIP prefixes for this county (soft validation heuristic only)
@@ -196,15 +242,6 @@ class CountyProfile:
     court_records_url: str  # court/case-record lookup system — reference only
     active: bool = True     # False = dormant/legacy market, excluded from default SAVED_SEARCHES
     notes: str = ""         # caveats worth remembering (e.g. "probate coverage unconfirmed")
-
-
-NOTICE_PLATFORMS: dict[str, str] = {
-    "mopublicnotices": "https://www.mopublicnotices.com",
-    "newmexicopublicnotices": "https://www.newmexicopublicnotices.com",
-    "oklahomanotices": "https://www.oklahomanotices.com",
-    "kansaspublicnotices": "https://www.kansaspublicnotices.com",
-    "tnpublicnotice": "https://www.tnpublicnotice.com",
-}
 
 COUNTIES: dict[str, CountyProfile] = {
     # ── Missouri — live, ASP.NET WebForms, already verified working ────
@@ -242,26 +279,32 @@ COUNTIES: dict[str, CountyProfile] = {
         court_records_url="https://www.courts.mo.gov/casenet/base/welcome.do",
         notes="Same caveats as Jackson — probate coverage unconfirmed on mopublicnotices.com.",
     ),
-    # ── New Mexico — config-ready, not yet live (see notice_platform note above) ──
+    # ── New Mexico — live as of 2026-07-22 ──────────────────────────────
     "bernalillo": CountyProfile(
         county="Bernalillo", state="NM", state_full="New Mexico",
-        notice_platform="newmexicopublicnotices", scraper_ready=True, active=False,
+        notice_platform="newmexicopublicnotices", scraper_ready=True, active=True,
         major_city="Albuquerque", zip_prefixes=["871", "870"],
         assessor_url="https://www.bernco.gov/assessor/",
         court_records_url="https://caselookup.nmcourts.gov/",
-        notes="Same vendor (lrsws.co) as tnpublicnotice.com — high-confidence scraper-compatible, "
-              "but saved searches must be created in the site UI + credentials obtained before first run. "
+        notes="Same vendor (lrsws.co) as tnpublicnotice.com — confirmed live 2026-07-22: login form "
+              "field IDs match MO exactly, but SEL_SAVED_SEARCHES_DROPDOWN's exact ID did NOT (different "
+              "master-page ContentPlaceHolder nesting — fixed to a suffix selector in config.py). The "
+              "account's pre-existing \"probate\" saved search already covers Bernalillo + Sandoval "
+              "together in one query (keywords: probate/estate/personal representative/notice to "
+              "creditors) — see SAVED_SEARCHES below; a \"foreclosure\" saved search also already exists "
+              "on the account (same two-county scope) but isn't wired into SAVED_SEARCHES yet. "
               "Probate case coverage on caselookup.nmcourts.gov is district-court only; NM often handles "
               "routine probate through an independent county Probate Court — verify separately. "
               "ArcGIS Open Data Hub parcel layers available as a closer-to-API assessor option.",
     ),
     "sandoval": CountyProfile(
         county="Sandoval", state="NM", state_full="New Mexico",
-        notice_platform="newmexicopublicnotices", scraper_ready=True, active=False,
+        notice_platform="newmexicopublicnotices", scraper_ready=True, active=True,
         major_city="Rio Rancho", zip_prefixes=["870", "871"],
         assessor_url="https://eaweb.sandovalcountynm.gov/Assessor",
         court_records_url="https://caselookup.nmcourts.gov/",
-        notes="Same caveats as Bernalillo (not yet live — needs saved searches created in site UI).",
+        notes="Same caveats as Bernalillo — live 2026-07-22, shares the same \"probate\" saved search "
+              "(covers both counties in one query).",
     ),
     # ── Oklahoma — NOT scraper-compatible with the current automation ──
     "oklahoma": CountyProfile(
@@ -335,6 +378,12 @@ def state_full_for_county(county: str) -> str:
     return profile.state_full if profile else ""
 
 
+def platform_for_county(county: str) -> str:
+    """Look up the notice_platform key for a known county. Empty string if unknown."""
+    profile = COUNTIES.get((county or "").strip().lower())
+    return profile.notice_platform if profile else ""
+
+
 # All state abbreviations/full names present in the registry — used to build
 # state-token regexes and validation sets so they aren't hardcoded to TN.
 KNOWN_STATE_ABBRS: set[str] = {p.state for p in COUNTIES.values()}
@@ -345,13 +394,22 @@ STATE_NAMES: dict[str, str] = {p.state: p.state_full for p in COUNTIES.values()}
 # These names must match exactly what appears in the dropdown on the site.
 # Create the dropdown entries with these exact labels before the first real run.
 # Only ACTIVE + scraper_ready counties are included — Oklahoma/Kansas aren't
-# scrapable with the current automation yet, and New Mexico's saved searches
-# haven't been created in the site UI yet (see COUNTIES notes above).
+# scrapable with the current automation yet.
+#
+# New Mexico's "probate" entry is unusual: unlike MO's one-search-per-county
+# pattern, this single saved search on newmexicopublicnotices.com already
+# covers both Bernalillo and Sandoval together (confirmed live 2026-07-22)
+# — so both counties list it here (needed for correct --counties filtering
+# per county), and main.py's _dedupe_by_saved_search_name() collapses them
+# back to one actual site search when both counties are requested together,
+# avoiding a redundant duplicate scrape of identical results.
 SAVED_SEARCHES: list[SavedSearch] = [
     SavedSearch("Jackson", "probate", "Jackson County Probate"),
     SavedSearch("Clay", "probate", "Clay County Probate"),
     SavedSearch("Platte", "probate", "Platte County Probate"),
     SavedSearch("Cass", "probate", "Cass County Probate"),
+    SavedSearch("Bernalillo", "probate", "probate"),
+    SavedSearch("Sandoval", "probate", "probate"),
 ]
 
 # ── Entity Detection ──────────────────────────────────────────────────

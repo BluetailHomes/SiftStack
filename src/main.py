@@ -48,6 +48,62 @@ def _filter_searches(
     return searches
 
 
+def _filter_searches_by_platform(searches: list[SavedSearch]) -> list[SavedSearch]:
+    """Drop any saved search whose county lives on a different notice
+    platform than the one this run is configured for (config.NOTICE_PLATFORM).
+
+    Architecture: one platform per scheduled run, not multi-platform-in-one-
+    run — see CLAUDE.md "Markets & Data Sources". A --counties filter that
+    mixes e.g. a Missouri county with a New Mexico county would otherwise
+    silently scrape whichever platform NOTICE_PLATFORM points at using
+    saved-search names that don't exist there. Warn and skip the mismatched
+    ones rather than fail the whole run — the matching counties are still a
+    valid, intentional invocation.
+    """
+    matching = []
+    for s in searches:
+        platform = config.platform_for_county(s.county)
+        if not platform:
+            logger.warning(
+                "Skipping saved search %r — county %r not found in config.COUNTIES",
+                s.saved_search_name, s.county,
+            )
+            continue
+        if platform != config.NOTICE_PLATFORM:
+            logger.warning(
+                "Skipping saved search %r — county %r is on platform %r, "
+                "but this run is configured for NOTICE_PLATFORM=%r. "
+                "Run separately with NOTICE_PLATFORM=%s to include it.",
+                s.saved_search_name, s.county, platform, config.NOTICE_PLATFORM, platform,
+            )
+            continue
+        matching.append(s)
+    return matching
+
+
+def _dedupe_by_saved_search_name(searches: list[SavedSearch]) -> list[SavedSearch]:
+    """Collapse multiple SAVED_SEARCHES entries that point at the same
+    saved_search_name down to one run of that search.
+
+    A saved search is a single deterministic query on the site — some sites
+    configure one saved search that already spans multiple counties (e.g.
+    New Mexico's "probate" search covers both Bernalillo and Sandoval in one
+    query), represented here as two SavedSearch entries (one per county) so
+    --counties filtering still works per-county. Without this step, running
+    with both counties selected would select that same saved search from
+    the dropdown twice and re-scrape identical results — doubling run time
+    and CAPTCHA-solve cost for zero new data.
+    """
+    seen: set[str] = set()
+    deduped = []
+    for s in searches:
+        if s.saved_search_name in seen:
+            continue
+        seen.add(s.saved_search_name)
+        deduped.append(s)
+    return deduped
+
+
 # ── Preflight health checks ─────────────────────────────────────────
 
 
@@ -201,8 +257,11 @@ async def actor_main() -> None:
 
         # Filter searches
         searches = _filter_searches(counties, types)
+        searches = _filter_searches_by_platform(searches)
+        searches = _dedupe_by_saved_search_name(searches)
         if not searches:
-            Actor.log.error("No saved searches match the given counties/types filters")
+            Actor.log.error("No saved searches match the given counties/types filters "
+                             "and NOTICE_PLATFORM=%s", config.NOTICE_PLATFORM)
             await Actor.fail(status_message="No matching saved searches")
             return
 
@@ -1698,8 +1757,13 @@ def cli_main() -> None:
         types = [t.strip() for t in args.types.split(",")]
 
     searches = _filter_searches(counties, types)
+    searches = _filter_searches_by_platform(searches)
+    searches = _dedupe_by_saved_search_name(searches)
     if not searches:
-        logging.error("No saved searches match the given --counties / --types filters")
+        logging.error(
+            "No saved searches match the given --counties / --types filters "
+            "and NOTICE_PLATFORM=%s", config.NOTICE_PLATFORM,
+        )
         sys.exit(1)
 
     logging.info(
