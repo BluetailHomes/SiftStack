@@ -38,6 +38,7 @@ from config import (
 )
 from data_formatter import _notice_id_from_url
 from foreclosure_filter import is_valid_foreclosure
+from probate_filter import is_valid_probate
 from notice_parser import NoticeData, is_target_county, parse_notice_page
 
 logger = logging.getLogger(__name__)
@@ -170,16 +171,38 @@ async def _navigate_to_dashboard(page: Page) -> bool:
 
 
 async def _set_per_page(page: Page) -> None:
-    """Set the results-per-page dropdown to max (50) if present."""
+    """Set the results-per-page dropdown to max (50) if present.
+
+    Confirmed live 2026-07-22 on newmexicopublicnotices.com: this select's
+    postback can complete (wait_for_load_state resolves) without the value
+    actually taking effect — the page then renders its default 10/page
+    while _get_page_info() computes total_pages assuming 50/page, badly
+    undercounting real pages. Verify the dropdown actually reflects the
+    new value before moving on; retry once if not (same postback-
+    reliability gap as the saved-search dropdown and next-page button).
+    """
     dropdown = await page.query_selector(SEL_PER_PAGE_DROPDOWN)
     if dropdown:
         current = await dropdown.input_value()
         if current != str(RESULTS_PER_PAGE):
-            logger.info("Setting results per page to %d", RESULTS_PER_PAGE)
-            await page.select_option(SEL_PER_PAGE_DROPDOWN, str(RESULTS_PER_PAGE))
-            await page.wait_for_load_state("networkidle")
-            await delay()
-            await delay()  # extra wait — ASP.NET DOM rebuild after postback
+            for attempt in range(1, 3):
+                logger.info("Setting results per page to %d (attempt %d/2)", RESULTS_PER_PAGE, attempt)
+                await page.select_option(SEL_PER_PAGE_DROPDOWN, str(RESULTS_PER_PAGE))
+                await page.wait_for_load_state("networkidle")
+                await delay()
+                await delay()  # extra wait — ASP.NET DOM rebuild after postback
+                dropdown = await page.query_selector(SEL_PER_PAGE_DROPDOWN)
+                new_value = await dropdown.input_value() if dropdown else current
+                if new_value == str(RESULTS_PER_PAGE):
+                    break
+                logger.warning(
+                    "  Per-page dropdown still shows %s after select — retrying", new_value,
+                )
+            else:
+                logger.warning(
+                    "  Could not confirm per-page=%d took effect — page-count math may be off",
+                    RESULTS_PER_PAGE,
+                )
 
 
 async def _get_page_info(page: Page) -> tuple[int, int]:
@@ -243,6 +266,13 @@ async def run_saved_search(
 
     # Selecting from the dropdown triggers an ASP.NET postback → full page navigation.
     # Must wait for navigation explicitly or the execution context gets destroyed.
+    # expect_navigation() is the primary path (proven live on mopublicnotices.com) —
+    # but confirmed live 2026-07-22 that newmexicopublicnotices.com's postback
+    # doesn't reliably fire as a Playwright "navigation" event even though the
+    # page does navigate underneath (tests/diag_nm_check_existing_searches.py
+    # hit the same TimeoutError here before switching to this fallback pattern).
+    # Same vendor platform, same selector, different navigation-detection
+    # behavior — fall back rather than fail the whole search.
     try:
         async with page.expect_navigation(wait_until="networkidle", timeout=30000):
             await page.select_option(
@@ -250,8 +280,19 @@ async def run_saved_search(
                 label=search.saved_search_name,
             )
     except Exception:
-        logger.error("Could not select '%s' from dropdown", search.saved_search_name)
-        return []
+        logger.warning(
+            "  expect_navigation timed out selecting '%s' — retrying with plain select + wait",
+            search.saved_search_name,
+        )
+        try:
+            await page.select_option(SEL_SAVED_SEARCHES_DROPDOWN, label=search.saved_search_name)
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass  # fall through to the URL check below, which reports the real failure
+        await delay()
+        if "search" not in page.url.lower():
+            logger.error("Could not select '%s' from dropdown", search.saved_search_name)
+            return []
 
     await delay()
 
@@ -307,11 +348,51 @@ async def run_saved_search(
         can_advance = next_btn and not await next_btn.get_attribute("disabled") if next_btn else False
 
         if can_advance:
-            await next_btn.click()
-            await page.wait_for_load_state("load")
-            await delay()
-            await delay()
-            current_page, total_pages = await _get_page_info(page)
+            # Confirmed live 2026-07-22 on newmexicopublicnotices.com: the
+            # "Next" button's postback doesn't always register as a real
+            # page change — wait_for_load_state("load") + delay() can
+            # complete while current_page hasn't actually incremented,
+            # causing the same page to be re-scraped in an infinite loop
+            # (same root cause as the saved-search dropdown fix above —
+            # NM's ASP.NET postback doesn't fire navigation completion as
+            # reliably as MO's). Verify the page number actually advanced;
+            # retry the click a few times before giving up.
+            page_before = current_page
+            for attempt in range(1, 5):
+                await next_btn.click()
+                await page.wait_for_load_state("load")
+                # "load" alone isn't enough after many postbacks in one
+                # session (confirmed live 2026-07-22 — this got flakier
+                # the more notices had already been go_back()'d through on
+                # this page, consistent with ASP.NET ViewState/postback
+                # state getting slower to settle deep into a long session).
+                # networkidle is best-effort here since a still-loading
+                # results grid can keep background requests going.
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+                await delay()
+                await delay()
+                current_page, total_pages = await _get_page_info(page)
+                if current_page != page_before:
+                    break
+                logger.warning(
+                    "  Next-page click didn't advance past page %d (attempt %d/4) — retrying",
+                    page_before, attempt,
+                )
+                # Extra settle before the retry click — give a possibly-
+                # still-processing postback more time rather than
+                # immediately re-clicking into the same in-flight state.
+                await asyncio.sleep(3)
+                next_btn = await page.query_selector(SEL_NEXT_PAGE_BUTTON)
+                if not next_btn:
+                    break
+            if current_page == page_before:
+                logger.error(
+                    "  Next-page click stuck on page %d after 4 attempts — stopping", page_before,
+                )
+                break
         else:
             # Grid lost or next button missing — attempt recovery to next page
             if current_page < total_pages:
@@ -412,6 +493,27 @@ async def _scrape_results_page(
                 # Re-find all view buttons (DOM refreshes after back-navigation)
                 view_buttons = await page.query_selector_all(SEL_VIEW_BUTTON_PATTERN)
                 if idx >= len(view_buttons):
+                    # Confirmed live 2026-07-22 on newmexicopublicnotices.com:
+                    # this is usually a transient post-go_back() render lag,
+                    # not a genuinely shrunk grid — a page freshly navigated
+                    # to (not go_back()'d to) reliably shows the full row
+                    # count (tests/diag_nm_pagination.py), but immediately
+                    # after go_back() the grid can briefly under-render. The
+                    # old behavior gave up on every remaining index in this
+                    # page instantly (no wait), which is what produced the
+                    # "Button index N out of range" cascade. Give the grid a
+                    # chance to catch up before assuming it's really gone.
+                    if len(view_buttons) > 0 and attempt < MAX_RETRIES:
+                        logger.debug(
+                            "  Button index %d not yet in grid (%d buttons, attempt %d/%d) — waiting",
+                            idx, len(view_buttons), attempt, MAX_RETRIES,
+                        )
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=8000)
+                        except Exception:
+                            pass
+                        await delay()
+                        continue
                     logger.warning("  Button index %d out of range (%d buttons)", idx, len(view_buttons))
                     if len(view_buttons) == 0:
                         logger.warning("  Results grid lost — stopping this page")
@@ -490,6 +592,10 @@ async def _scrape_results_page(
                 # Apply foreclosure filter
                 if not is_valid_foreclosure(notice):
                     logger.debug("  Filtered out (not foreclosure): %s", notice.source_url)
+                # Apply probate filter (same category — NM's "probate" saved
+                # search matches loosely; see probate_filter.py)
+                elif not is_valid_probate(notice):
+                    logger.debug("  Filtered out (not probate): %s", notice.source_url)
                 # Apply county validation — reject notices where the property
                 # is actually in a different county (search false positive)
                 elif not is_target_county(notice.raw_text, search.county):
