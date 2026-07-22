@@ -691,7 +691,19 @@ async def _filter_by_list(page: Page, list_name: str) -> bool:
 
 
 async def _select_all_records(page: Page) -> bool:
-    """Select all records on the current page. Returns True if selected."""
+    """Select every record matching the current filter (not just the visible page).
+
+    Confirmed live 2026-07-22: the header control is a custom styled checkbox
+    (`Checkbox__CustomCheckboxIcon` — NOT a native <input type="checkbox">,
+    which is why earlier `querySelectorAll('input[type="checkbox"]')` based
+    strategies always found 0 elements here). Clicking it opens a small
+    dropdown with "Select visible (N)" and "Select all (N)" options — DataSift
+    already has a native "select everything matching this filter" action, so
+    there's no need to paginate through checkboxes by hand. Verified live
+    against a real 25-record filtered list: clicking "Select all (25)" selects
+    all 25 (not just the 10 rendered on the first page) and reveals both the
+    Manage and Send To buttons.
+    """
     try:
         # Dismiss popups aggressively — the notification popup blocks all clicks
         await _dismiss_popups(page)
@@ -701,82 +713,34 @@ async def _select_all_records(page: Page) -> bool:
 
         await _screenshot(page, "before_select_all")
 
-        # Strategy 1: Find the header checkbox position via JS, then use Playwright
-        # mouse.click to properly trigger React's event system.
-        # The header checkbox is near the "OWNER" column header text.
-        header_pos = await page.evaluate("""() => {
-            // Find the OWNER header text element
-            const allEls = document.querySelectorAll('*');
-            for (const el of allEls) {
-                if (el.textContent.trim() === 'OWNER' && el.children.length === 0) {
-                    const rect = el.getBoundingClientRect();
-                    // The header checkbox is in the same row, to the left
-                    // Find the nearest checkbox (same vertical position)
-                    const checkboxes = document.querySelectorAll('input[type="checkbox"]');
-                    let best = null;
-                    let bestDist = Infinity;
-                    for (const cb of checkboxes) {
-                        if (cb.classList.contains('react-toggle-screenreader-only')) continue;
-                        const cbRect = cb.getBoundingClientRect();
-                        // Must be roughly same Y position (within 30px) and to the left
-                        const yDist = Math.abs(cbRect.top - rect.top);
-                        if (yDist < 30 && cbRect.left < rect.left) {
-                            if (yDist < bestDist) {
-                                bestDist = yDist;
-                                best = cbRect;
-                            }
-                        }
-                    }
-                    if (best) {
-                        return {x: best.left + best.width/2, y: best.top + best.height/2};
-                    }
-                }
-            }
-            return null;
-        }""")
+        checkbox_dropdown = page.locator('[class*="Checkbox__CustomCheckboxIcon"]').first
+        if await checkbox_dropdown.count() == 0:
+            logger.warning("Header checkbox dropdown not found")
+            await _screenshot(page, "select_all_no_checkbox")
+            return False
 
-        if header_pos:
-            # Use Playwright mouse click which properly triggers React events
-            await page.mouse.click(header_pos["x"], header_pos["y"])
-            clicked_header = f"clicked at ({header_pos['x']:.0f}, {header_pos['y']:.0f})"
-            logger.info("Clicked header checkbox via coordinates: %s", clicked_header)
-            await page.wait_for_timeout(1500)
-        else:
-            clicked_header = None
+        await checkbox_dropdown.click(force=True)
+        await page.wait_for_timeout(1000)
+        await _screenshot(page, "select_all_dropdown_open")
 
-        if clicked_header:
-            logger.info("Clicked header checkbox via JS: %s", clicked_header)
-            await page.wait_for_timeout(1500)
-        else:
-            # Strategy 2: Click each record checkbox individually via JS
-            clicked_count = await page.evaluate("""() => {
-                const checkboxes = document.querySelectorAll('input[type="checkbox"]');
-                let clicked = 0;
-                for (const cb of checkboxes) {
-                    if (cb.classList.contains('react-toggle-screenreader-only')) continue;
-                    cb.click();
-                    clicked++;
-                }
-                return clicked;
-            }""")
-            logger.info("Clicked %d checkboxes via JS (all non-toggle)", clicked_count)
-            await page.wait_for_timeout(1500)
+        select_all_option = page.locator(r'text=/Select all \(\d+\)/')
+        if await select_all_option.count() == 0:
+            logger.warning("'Select all (N)' option not found in checkbox dropdown")
+            await _screenshot(page, "select_all_no_option")
+            return False
 
-        await _screenshot(page, "records_selected_header")
+        option_text = await select_all_option.first.inner_text()
+        await select_all_option.first.click(force=True)
+        await page.wait_for_timeout(1500)
+        logger.info("Clicked checkbox dropdown option: %s", option_text)
 
-        # After checking the header checkbox, a "Select All X records" banner may appear
-        select_all_link = page.locator('text="Select all"')
-        if await select_all_link.count() > 0:
-            await select_all_link.first.click()
-            await page.wait_for_timeout(1000)
-            logger.debug("Clicked 'Select all' records link")
+        await _screenshot(page, "records_selected")
 
         # Verify: check if Manage or Send To buttons are now visible
         manage_visible = await page.locator('button:has-text("Manage")').count() > 0
-        send_to_visible = await page.locator('button:has-text("Send To")').count() > 0
+        send_to_visible = await page.locator('button:has-text("Send To"), button:has-text("Send to")').count() > 0
         logger.info("After select: Manage visible=%s, Send To visible=%s", manage_visible, send_to_visible)
 
-        await _screenshot(page, "records_selected")
         return manage_visible or send_to_visible
     except Exception as e:
         logger.warning("Select all records failed: %s", e)
