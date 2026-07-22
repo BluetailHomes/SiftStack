@@ -171,13 +171,22 @@ async def login(page, email: str = None, password: str = None) -> bool:
     # Click Sign In
     await page.get_by_role("button", name="Sign In").click()
 
-    # Wait for navigation away from login page
+    # Wait for a DOM element that only renders once authenticated, rather
+    # than the post-login URL — confirmed live 2026-07-22 that login can
+    # genuinely succeed (full dashboard rendered, user avatar/name visible)
+    # while the address bar string never leaves "/login": the app hit an
+    # in-app 404 route (behind a "show notifications?" popup) on whatever
+    # post-login redirect target it was targeting, and Playwright's
+    # page.url reflected that stale history state rather than the real
+    # authenticated screen. The old wait_for_url("**/dashboard/general**")
+    # timed out and reported false failures in exactly that situation.
+    # The user-menu avatar is present on every authenticated screen
+    # regardless of which specific route the login redirect lands on.
     try:
-        await page.wait_for_url("**/dashboard/general**", timeout=15000)
+        await page.wait_for_selector("#rs_main-user-avatar", timeout=15000)
     except PwTimeout:
-        if "/login" in page.url:
-            logger.error("DataSift login failed — still on login page")
-            return False
+        logger.error("DataSift login failed — user menu never appeared")
+        return False
 
     await save_cookies(page)
     logger.info("DataSift login successful")

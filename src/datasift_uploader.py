@@ -98,7 +98,17 @@ async def upload_csv(
     # Wait for SPA to fully render (longer for headless/cloud environments)
     await page.wait_for_timeout(8000)
 
-    # Dismiss notifications popup if present
+    # Dismiss notifications popup + Beamer NPS survey iframe if present.
+    # Confirmed live 2026-07-22: on a second upload within the same
+    # session (e.g. the Heirs CSV right after the DMs CSV), the Beamer NPS
+    # survey iframe (#npsIframeContainer / #beamerNPSWidget) can be
+    # "active" and blocks ALL pointer events across the whole page —
+    # including "Upload File", which then fails after a full 30s of retried
+    # clicks rather than a clear error. The plain "NO, THANKS" button-text
+    # check below doesn't catch this (it's not that popup), so also call
+    # the shared dismiss_popups() helper, which explicitly removes the NPS
+    # iframe from the DOM (see datasift_core.dismiss_popups docstring).
+    await _dismiss_popups(page)
     try:
         no_thanks = page.locator('button:has-text("NO, THANKS"), button:has-text("No, thanks")')
         if await no_thanks.count() > 0:
@@ -303,10 +313,27 @@ async def upload_csv(
     # Click "Next Step" to proceed to step 2
     await _click_next_step(page, timeout=30000)
 
-    # ── Wizard Step 2: Add tags ──
-    logger.info("Wizard Step 2: Adding 'Courthouse Data' tag...")
+    # ── Wizard Step 2: Property Enrichment ──
+    # Confirmed live 2026-07-22: DataSift added this step to the upload
+    # wizard itself (between Setup and Add Tags) since this automation was
+    # first built — the wizard used to go straight from Setup to Add Tags,
+    # with "Enrich Property Information" only reachable afterward via
+    # Manage -> Enrich Data (still true post-upload; see upload_and_enrich()
+    # below). Every subsequent step in this function is now one position
+    # later than its comment originally said. Leave "Swap Owners" at its
+    # default OFF here — same reason it's kept OFF in the separate
+    # post-upload enrich flow: protects the PR/DM contact mapping this
+    # pipeline already computed from being overwritten by DataSift's own
+    # owner data.
+    logger.info("Wizard Step 2: Property Enrichment (leaving defaults — Swap Owners OFF)...")
     await page.wait_for_timeout(1000)
-    await _screenshot(page, "step2_tags")
+    await _screenshot(page, "step2_enrichment")
+    await _click_next_step(page, timeout=30000)
+
+    # ── Wizard Step 3: Add tags ──
+    logger.info("Wizard Step 3: Adding 'Courthouse Data' tag...")
+    await page.wait_for_timeout(1000)
+    await _screenshot(page, "step3_tags")
 
     # Add "Courthouse Data" tag via the Custom Tags input on the right side
     try:
@@ -319,7 +346,7 @@ async def upload_csv(
             await page.wait_for_timeout(300)
             await tag_input.first.type("Courthouse Data", delay=50)
             await page.wait_for_timeout(1500)
-            await _screenshot(page, "step2_tag_typed")
+            await _screenshot(page, "step3_tag_typed")
 
             # Check if "Courthouse Data" appears in autocomplete dropdown — click it
             tag_option = page.locator('text="Courthouse Data"')
@@ -365,7 +392,7 @@ async def upload_csv(
                     await page.wait_for_timeout(1000)
                     logger.info("Added 'Courthouse Data' tag (via Enter fallback)")
 
-            await _screenshot(page, "step2_tag_added")
+            await _screenshot(page, "step3_tag_added")
         else:
             logger.warning("Tag input not found — 'Courthouse Data' tag NOT added")
     except Exception as e:
@@ -373,10 +400,10 @@ async def upload_csv(
 
     await _click_next_step(page)
 
-    # ── Wizard Step 3: Upload the file ──
-    logger.info("Wizard Step 3: Uploading CSV file: %s", csv_path.name)
+    # ── Wizard Step 4: Upload the file ──
+    logger.info("Wizard Step 4: Uploading CSV file: %s", csv_path.name)
     await page.wait_for_timeout(3000)
-    await _screenshot(page, "step3_before_upload")
+    await _screenshot(page, "step4_before_upload")
 
     try:
         file_input = page.locator('input[type="file"]')
@@ -393,7 +420,7 @@ async def upload_csv(
             logger.info("CSV file selected: %s", csv_path.name)
             await page.wait_for_timeout(3000)
         else:
-            await _screenshot(page, "step3_no_file_input")
+            await _screenshot(page, "step4_no_file_input")
             result["message"] = "Could not find file input element"
             logger.error(result["message"])
             return result
@@ -402,13 +429,13 @@ async def upload_csv(
         logger.error(result["message"])
         return result
 
-    await _screenshot(page, "step3_file_uploaded")
+    await _screenshot(page, "step4_file_uploaded")
     await _click_next_step(page)
 
-    # ── Wizard Step 4: Map the columns ──
-    logger.info("Wizard Step 4: Column mapping — mapping Tags and Lists...")
+    # ── Wizard Step 5: Map the columns ──
+    logger.info("Wizard Step 5: Column mapping — mapping Tags and Lists...")
     await page.wait_for_timeout(3000)
-    await _screenshot(page, "step4_column_mapping")
+    await _screenshot(page, "step5_column_mapping")
 
     # Try to drag unmapped columns (left side) to their targets (right side)
     # DataSift uses styled-components with draggable="false" — need slow mouse drag
@@ -464,16 +491,16 @@ async def upload_csv(
         except Exception as e:
             logger.warning("Column mapping %s failed: %s", col_name, e)
 
-    await _screenshot(page, "step4_after_mapping")
+    await _screenshot(page, "step5_after_mapping")
 
     # Click Next Step to proceed past mapping
     await _click_next_step(page)
-    await _screenshot(page, "step4_mapping_done")
+    await _screenshot(page, "step5_mapping_done")
 
-    # ── Wizard Step 5: Review ──
-    logger.info("Wizard Step 5: Review and finish upload...")
+    # ── Wizard Step 6: Review ──
+    logger.info("Wizard Step 6: Review and finish upload...")
     await page.wait_for_timeout(2000)
-    await _screenshot(page, "step5_review")
+    await _screenshot(page, "step6_review")
 
     try:
         finish_btn = page.locator(
@@ -485,7 +512,7 @@ async def upload_csv(
             await finish_btn.first.click()
             logger.info("Clicked Finish Upload")
         else:
-            await _screenshot(page, "step5_no_finish_btn")
+            await _screenshot(page, "step6_no_finish_btn")
             logger.warning("Finish Upload button not found")
     except Exception as e:
         logger.warning("Finish step: %s", e)
@@ -505,7 +532,7 @@ async def upload_csv(
         result["message"] = success_text or "Upload completed"
         logger.info("DataSift upload complete: %s", result["message"])
     except PwTimeout:
-        await _screenshot(page, "step5_timeout")
+        await _screenshot(page, "step6_timeout")
         result["message"] = "Upload may have succeeded but confirmation timed out — check Activity page"
         logger.warning(result["message"])
         result["success"] = True
@@ -523,6 +550,46 @@ async def _navigate_to_records(page: Page) -> None:
         await page.goto(DATASIFT_RECORDS_URL, wait_until="domcontentloaded")
     await page.wait_for_timeout(5000)
     await _dismiss_popups(page)
+    await _select_completeness_tab(page, "All")
+
+
+async def _select_completeness_tab(page: Page, tab: str) -> bool:
+    """Click the Clean / Incomplete / All completeness tab on the Records page.
+
+    Confirmed live 2026-07-22: the Records page defaults to "Clean", which
+    hides any record missing a field DataSift considers required. Probate
+    notices legitimately have no property address by design (PR/DM mailing
+    address is used instead — see CLAUDE.md), so a probate-sourced upload
+    shows "No property records found" under Clean even though the records
+    exist. _select_all_records then finds 0 checkboxes and enrich/skip-trace
+    both fail with "Could not select records". Switching to "All" surfaces
+    them. Uses the same JS-locate + mouse.click coordinate strategy as
+    _select_all_records's header-checkbox lookup, since this tab is a plain
+    text label, not a real <button>.
+    """
+    try:
+        pos = await page.evaluate("""(tabText) => {
+            const allEls = document.querySelectorAll('*');
+            for (const el of allEls) {
+                if (el.children.length === 0 && el.textContent.trim() === tabText) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0 && rect.x > 250) {
+                        return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+                    }
+                }
+            }
+            return null;
+        }""", tab)
+        if not pos:
+            logger.debug("Completeness tab '%s' not found", tab)
+            return False
+        await page.mouse.click(pos["x"], pos["y"])
+        await page.wait_for_timeout(1500)
+        logger.debug("Selected completeness tab: %s", tab)
+        return True
+    except Exception as e:
+        logger.debug("Select completeness tab '%s' failed: %s", tab, e)
+        return False
 
 
 async def _filter_by_list(page: Page, list_name: str) -> bool:
