@@ -251,8 +251,12 @@ COUNTIES: dict[str, CountyProfile] = {
         major_city="Kansas City", zip_prefixes=["640", "641"],
         assessor_url="https://www.jacksongov.org/departments/collection-taxes-assessment/assessment",
         court_records_url="https://www.courts.mo.gov/casenet/base/welcome.do",
-        notes="Foreclosure/tax-sale notices confirmed on mopublicnotices.com; "
-              "probate coverage not confirmed in site copy — verify on first live pull. "
+        notes="Foreclosure/tax-sale notices confirmed on mopublicnotices.com; probate coverage also "
+              "confirmed — real probate notices captured and exported to CSV on 2026-07-17 and "
+              "2026-07-18 (output/tn_notices_2026-07-17_*.csv, output/tn_notices_2026-07-18_215447.csv), "
+              "including the MO boilerplate-leak cases (\"May Administer The Estate "
+              "Independently...\", \"Was Appointed...\") that motivated _looks_like_prose_fragment() "
+              "in notice_parser.py. "
               "ArcGIS Open Data Hub parcel layers available as a closer-to-API assessor option.",
     ),
     "clay": CountyProfile(
@@ -261,7 +265,11 @@ COUNTIES: dict[str, CountyProfile] = {
         major_city="Liberty", zip_prefixes=["640", "641"],
         assessor_url="https://gisweb.claycountymo.gov/ps/",
         court_records_url="https://www.courts.mo.gov/casenet/base/welcome.do",
-        notes="Same caveats as Jackson — probate coverage unconfirmed on mopublicnotices.com.",
+        notes="Probate coverage confirmed — real probate notices captured and exported to CSV on "
+              "2026-07-18 (output/tn_notices_2026-07-18_215447.csv: Ritzinger, Roe, Stevenson, Rizek "
+              "executors), including the same boilerplate-leak cases "
+              "(\"...Business Address And Phone Number Are:...\") _looks_like_prose_fragment() in "
+              "notice_parser.py was built to catch.",
     ),
     "platte": CountyProfile(
         county="Platte", state="MO", state_full="Missouri",
@@ -269,7 +277,13 @@ COUNTIES: dict[str, CountyProfile] = {
         major_city="Platte City", zip_prefixes=["640", "641"],
         assessor_url="https://www.co.platte.mo.us/real-property",
         court_records_url="https://www.courts.mo.gov/casenet/base/welcome.do",
-        notes="Same caveats as Jackson — probate coverage unconfirmed on mopublicnotices.com.",
+        notes="Probate coverage still NOT confirmed — unlike Jackson/Clay, no run has ever captured a "
+              "real Platte probate notice into output (checked all available logs/CSVs as of "
+              "2026-07-22). The one data point (2026-07-18 daily run) found 1 page of raw search "
+              "results but 0 survived — inconclusive on its own, since that run's since_date window "
+              "was only 1 day back, so it may just mean no new Platte probate notice was published "
+              "that specific day rather than that the search/parsing doesn't work. Needs a real "
+              "capture (e.g. a wider-window historical pull) before calling this confirmed.",
     ),
     "cass": CountyProfile(
         county="Cass", state="MO", state_full="Missouri",
@@ -277,7 +291,12 @@ COUNTIES: dict[str, CountyProfile] = {
         major_city="Harrisonville", zip_prefixes=["647", "640"],
         assessor_url="https://cass.missouriassessors.com/search.php",
         court_records_url="https://www.courts.mo.gov/casenet/base/welcome.do",
-        notes="Same caveats as Jackson — probate coverage unconfirmed on mopublicnotices.com.",
+        notes="Probate coverage still NOT confirmed — same situation as Platte: no run has ever "
+              "captured a real Cass probate notice into output (checked all available logs/CSVs as of "
+              "2026-07-22). The one data point (2026-07-18 daily run) found 2 pages of raw search "
+              "results but 0 survived, in a since_date window only 1 day back — inconclusive, not "
+              "evidence the search/parsing is broken. Needs a real capture before calling this "
+              "confirmed.",
     ),
     # ── New Mexico — config-ready, blocked on pagination (see notes) ────
     "bernalillo": CountyProfile(
