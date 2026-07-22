@@ -279,32 +279,45 @@ COUNTIES: dict[str, CountyProfile] = {
         court_records_url="https://www.courts.mo.gov/casenet/base/welcome.do",
         notes="Same caveats as Jackson — probate coverage unconfirmed on mopublicnotices.com.",
     ),
-    # ── New Mexico — live as of 2026-07-22 ──────────────────────────────
+    # ── New Mexico — config-ready, blocked on pagination (see notes) ────
     "bernalillo": CountyProfile(
         county="Bernalillo", state="NM", state_full="New Mexico",
-        notice_platform="newmexicopublicnotices", scraper_ready=True, active=True,
+        notice_platform="newmexicopublicnotices", scraper_ready=True, active=False,
         major_city="Albuquerque", zip_prefixes=["871", "870"],
         assessor_url="https://www.bernco.gov/assessor/",
         court_records_url="https://caselookup.nmcourts.gov/",
-        notes="Same vendor (lrsws.co) as tnpublicnotice.com — confirmed live 2026-07-22: login form "
-              "field IDs match MO exactly, but SEL_SAVED_SEARCHES_DROPDOWN's exact ID did NOT (different "
-              "master-page ContentPlaceHolder nesting — fixed to a suffix selector in config.py). The "
-              "account's pre-existing \"probate\" saved search already covers Bernalillo + Sandoval "
-              "together in one query (keywords: probate/estate/personal representative/notice to "
-              "creditors) — see SAVED_SEARCHES below; a \"foreclosure\" saved search also already exists "
-              "on the account (same two-county scope) but isn't wired into SAVED_SEARCHES yet. "
-              "Probate case coverage on caselookup.nmcourts.gov is district-court only; NM often handles "
-              "routine probate through an independent county Probate Court — verify separately. "
-              "ArcGIS Open Data Hub parcel layers available as a closer-to-API assessor option.",
+        notes="Same vendor (lrsws.co) as tnpublicnotice.com. Confirmed live 2026-07-22: login works "
+              "(the earlier failure was a temporary rate-limit, not a real credential/bot-detection "
+              "issue) and login form field IDs match MO exactly, but SEL_SAVED_SEARCHES_DROPDOWN's "
+              "exact ID did NOT (different master-page ContentPlaceHolder nesting — fixed to a suffix "
+              "selector in config.py). The account's pre-existing \"probate\" saved search already "
+              "covers Bernalillo + Sandoval together in one query (keywords: probate/estate/personal "
+              "representative/notice to creditors) — see SAVED_SEARCHES below; a \"foreclosure\" saved "
+              "search also already exists on the account (same two-county scope) but isn't wired into "
+              "SAVED_SEARCHES yet. probate_filter.py (noise filter) and the relaxed PR-address "
+              "validation are both built and verified. NOT YET LIVE — blocked on intermittent "
+              "pagination past page 1 (ASP.NET postback/ViewState reliability degrades deeper into a "
+              "session; MO confirmed unaffected via its own production logs). No live run has yet "
+              "produced real validated output beyond page 1 — leave active=False until that's "
+              "resolved. Open lead for whoever picks this up: repeated test reruns accumulate a large "
+              "seen_ids skip-cache, producing a fast go_back()-heavy access pattern on page 1 that may "
+              "be more adversarial than normal daily production runs (where most rows are genuinely "
+              "new and get natural pacing from a real CAPTCHA solve between interactions) — worth "
+              "testing whether a clean run (or one seeded with fewer skips) is actually more reliable "
+              "before assuming the postback fix itself is insufficient. Probate case coverage on "
+              "caselookup.nmcourts.gov is district-court only; NM often handles routine probate "
+              "through an independent county Probate Court — verify separately. ArcGIS Open Data Hub "
+              "parcel layers available as a closer-to-API assessor option.",
     ),
     "sandoval": CountyProfile(
         county="Sandoval", state="NM", state_full="New Mexico",
-        notice_platform="newmexicopublicnotices", scraper_ready=True, active=True,
+        notice_platform="newmexicopublicnotices", scraper_ready=True, active=False,
         major_city="Rio Rancho", zip_prefixes=["870", "871"],
         assessor_url="https://eaweb.sandovalcountynm.gov/Assessor",
         court_records_url="https://caselookup.nmcourts.gov/",
-        notes="Same caveats as Bernalillo — live 2026-07-22, shares the same \"probate\" saved search "
-              "(covers both counties in one query).",
+        notes="Same caveats as Bernalillo — shares the same \"probate\" saved search (covers both "
+              "counties in one query). NOT YET LIVE — see Bernalillo's notes for the pagination "
+              "blocker; leave active=False until resolved.",
     ),
     # ── Oklahoma — NOT scraper-compatible with the current automation ──
     "oklahoma": CountyProfile(
