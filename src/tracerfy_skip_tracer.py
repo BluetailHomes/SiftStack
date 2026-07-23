@@ -278,7 +278,17 @@ def batch_skip_trace(
                      "zip", "mail_address", "mail_city", "mail_state"])
     for notice_ref, first, last, address, city, zip_code, _ in lookup_map:
         state = notice_ref.state
-        writer.writerow([first, last, address, city, state, zip_code, "", "", ""])
+        # address/city here is already the DM/PR mailing address (see
+        # _get_contacts_for_trace: decision_maker_street or notice.address),
+        # not a separate property address. Confirmed live 2026-07-23: with
+        # mail_address/mail_city/mail_state always blank, Tracerfy returned
+        # a "completed" batch in ~6s (vs. a 32s estimate) with 0/239 matched
+        # despite every record having a real name + real mailing address —
+        # Tracerfy's matcher needs the mailing_* columns populated, not just
+        # the address_column ones. Duplicate the same real address into both
+        # so the match succeeds regardless of which field it weights.
+        writer.writerow([first, last, address, city, state, zip_code,
+                         address, city, state])
     csv_content = csv_buffer.getvalue()
     csv_buffer.close()
 
