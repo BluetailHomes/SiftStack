@@ -129,7 +129,10 @@ def _download_kvs_record(token: str, store_id: str, key: str, dest: Path) -> Non
 
 def main() -> int:
     token = os.environ.get("APIFY_TOKEN", "")
-    actor_id = os.environ.get("APIFY_ACTOR_ID", DEFAULT_ACTOR_ID)
+    # GitHub Actions sets APIFY_ACTOR_ID to an empty string (not absent) when
+    # the optional secret isn't configured — `.get(key, default)` only falls
+    # back on a missing key, not an empty value, so use `or` instead.
+    actor_id = os.environ.get("APIFY_ACTOR_ID") or DEFAULT_ACTOR_ID
     email = os.environ.get("DATASIFT_EMAIL", "")
     password = os.environ.get("DATASIFT_PASSWORD", "")
 
