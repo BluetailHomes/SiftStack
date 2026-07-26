@@ -1,0 +1,45 @@
+name: Stage 2 - DataSift Upload
+
+# Second stage of the daily pipeline. The Apify Actor (tn-public-notice-scraper)
+# runs at 2:00 AM America/Phoenix (09:00 UTC) and deliberately stops short of
+# uploading to DataSift — headless Playwright inside Apify's Actor container
+# was found unreliable for the upload wizard (see src/stage2_datasift_upload.py
+# docstring for the full explanation). This workflow runs in a plain GitHub
+# Actions Ubuntu runner instead — a different environment than Apify's Actor
+# container — and finishes the job: pull the already-enriched, DataSift-
+# formatted CSVs out of the Apify Key-Value Store and upload them for real.
+#
+# Timing: 10:10 UTC = 3:10 AM America/Phoenix (fixed UTC-7, no DST) — about
+# 70 minutes after the Apify run starts (it typically finishes in ~8 min) and
+# 50 minutes before Rahaf's 4:00 AM start.
+
+on:
+  schedule:
+    - cron: '10 10 * * *'
+  workflow_dispatch: {}  # allows manually triggering a run from the Actions tab
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Run stage 2 DataSift uploader
+        working-directory: src
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          APIFY_ACTOR_ID: ${{ secrets.APIFY_ACTOR_ID }}
+          DATASIFT_EMAIL: ${{ secrets.DATASIFT_EMAIL }}
+          DATASIFT_PASSWORD: ${{ secrets.DATASIFT_PASSWORD }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python stage2_datasift_upload.py

@@ -138,9 +138,25 @@ apify push
 
 ### Actor Input (configured in Apify Console or `input.json`)
 - `mode`: "daily" or "historical"
-- `counties` / `types`: arrays to filter saved searches (empty = all)
-- `tn_username`, `tn_password`, `captcha_api_key`: secrets (required)
+- `counties` / `types`: arrays to filter saved searches (empty = all — `types` defaults to empty; the 4 live MO counties are all probate, not foreclosure, despite the Actor's legacy name)
+- `notice_site_username`, `notice_site_password`, `captcha_api_key`: secrets (required) — `tn_username`/`tn_password` still work as a fallback alias for the first two, kept for backward compatibility
+- Every enrichment/CRM credential tested end-to-end 2026-07-22/23 has its own Actor input field: `anthropic_api_key`, `smarty_auth_id`/`smarty_auth_token`, `openwebninja_api_key`, `serper_api_key`, `firecrawl_api_key`, `tracerfy_api_key`, `trestle_api_key`, `ancestry_email`/`ancestry_password`, `datasift_email`/`datasift_password`, `slack_webhook_url` — all optional, all degrade gracefully if left blank (see `.actor/input_schema.json` for the full field list and descriptions)
 - `google_drive_folder_id`, `google_service_account_key`: optional Google Drive upload
+
+### Known Gaps in the Actor Path (as of 2026-07-24)
+- **Preflight checks**: `_preflight_check()` (2Captcha balance, site connectivity, missing-credential warnings) now runs on the Actor path too, same as CLI — added 2026-07-24 after discovering the Actor path only had a hand-rolled partial credential check with no balance/connectivity signal. A failed preflight now calls `Actor.fail()` with a clear status message and fires the same Slack alert as the CLI path.
+- **Dedup state does not carry over between the CLI and the Actor.** The CLI path tracks seen notice IDs in local `seen_ids.json`; the Actor path tracks them in Apify's Key-Value Store (`seen_notice_ids`). Running the CLI manually against the same counties/window a scheduled Actor run also covers does not mark anything as seen for the Actor, and vice versa — not a data-loss risk, but a "0 new notices" result from one path says nothing about the other. Tracked separately, not yet unified.
+
+### DataSift Upload Is a Two-Stage Pipeline for Scheduled Actor Runs (added 2026-07-26)
+
+The Actor path intentionally does **not** upload to DataSift itself (see upstream commit `e5e2d509`, "Replace automated DataSift upload with manual CSV download links" — headless Playwright inside Apify's Actor container was found unreliable for the upload wizard's SPA timing). Instead it writes DataSift-formatted CSVs (already fully enriched — Smarty, Zillow, tax, obituary/DM, Tracerfy, Trestle all ran) to the Apify Key-Value Store and posts download links to Slack for manual upload.
+
+For the scheduled 2:00 AM `America/Phoenix` run — meant to give a 2-hour head start before Rahaf's 4:00 AM start — a manual step defeats the purpose, since nobody is awake at 2am to do it. **Stage 2 closes that gap without touching the Apify container:**
+
+- **`src/stage2_datasift_upload.py`** — queries the Apify API for the last `SUCCEEDED` run of `tn-public-notice-scraper` (`DLE4KmqvBSxrxGUab`), pulls the `datasift_*.csv` records straight out of that run's KVS, and calls the same `upload_to_datasift`/`upload_datasift_split` Playwright automation the CLI's `--upload-datasift` flag uses — no re-enrichment, since the CSVs pulled from KVS are already final. Refuses to run if the last SUCCEEDED run is more than `MAX_RUN_AGE_HOURS` (6h) old, to avoid silently re-uploading a stale prior-day run under a wrong-dated list name.
+- **`.github/workflows/stage2-datasift-upload.yml`** — runs this script unattended on a plain GitHub Actions Ubuntu runner (a different environment than Apify's Actor container — the whole point of the split) at `10 10 * * *` UTC = 3:10 AM `America/Phoenix`, ~70 min after the Actor run starts and ~50 min before Rahaf's 4am start. Needs repo secrets: `APIFY_TOKEN`, `APIFY_ACTOR_ID` (optional, defaults to the ID above), `DATASIFT_EMAIL`, `DATASIFT_PASSWORD`, `SLACK_WEBHOOK_URL` (optional).
+- **Known limitation, not yet solved:** no idempotency check against DataSift itself. If the GitHub Actions job is manually re-run after a partial failure, it will create a second DataSift list with the same `list_name` and re-upload, rather than detecting the first attempt already landed. Low risk given the workflow only runs once nightly on a schedule, but worth knowing before using `workflow_dispatch` to retry a failed run.
+- **Partially live-tested 2026-07-26.** The Apify-API half (find last SUCCEEDED run, freshness guard, list + download `datasift_*.csv` from KVS) was run for real against the production Actor and produced two valid 4-row CSVs matching that run's actual output. The Playwright upload half could not be exercised in that test environment — Chromium's headless shell failed to launch there (`libXdamage.so.1` missing, no root to `apt install` it), which is a sandbox limitation, not a signal about GitHub Actions: `ubuntu-latest` runners have full apt access and the workflow uses `playwright install --with-deps chromium`, the same dependency-resolution path the working local CLI upload already relies on. Still not yet validated against a real 2am→3:10am cycle end-to-end — treat the first few nights as a supervised rollout, and consider triggering the workflow manually via `workflow_dispatch` once secrets are set up to get a real signal before trusting the cron.
 
 ### Actor Output
 - **Dataset**: structured records pushed via `Actor.push_data()`
