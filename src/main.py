@@ -219,6 +219,8 @@ async def actor_main() -> None:
             "DATASIFT_PASSWORD": actor_input.get("datasift_password", ""),
             "SLACK_WEBHOOK_URL": actor_input.get("slack_webhook_url", ""),
             "TRESTLE_API_KEY": actor_input.get("trestle_api_key", ""),
+            "ANCESTRY_EMAIL": actor_input.get("ancestry_email", ""),
+            "ANCESTRY_PASSWORD": actor_input.get("ancestry_password", ""),
         }
         for key, val in _cred_map.items():
             setattr(config, key, val)
@@ -242,18 +244,26 @@ async def actor_main() -> None:
         include_commercial = actor_input.get("include_commercial", False)
         include_entities = actor_input.get("include_entities", False)
 
-        # Validate
-        if not config.NOTICE_SITE_EMAIL or not config.NOTICE_SITE_PASSWORD:
-            Actor.log.error("notice_site_username and notice_site_password are required")
+        # ── Preflight health checks (shared with the CLI path) ──────────
+        # Confirmed live 2026-07-23: this block used to be a hand-rolled
+        # partial check (credentials only, no 2Captcha balance, no site
+        # connectivity check, no Smarty/OpenWebNinja/Anthropic warnings) —
+        # meaning a scheduled Actor run could start with a dead 2Captcha
+        # balance or a missing optional key and give no early signal.
+        # Reusing the real _preflight_check() gives the Actor path the
+        # exact same checks and Slack alert as the CLI path.
+        preflight_failures = _preflight_check(mode)
+        if preflight_failures:
+            for f in preflight_failures:
+                Actor.log.error("Preflight FAILED: %s", f)
             try:
                 from slack_notifier import notify_preflight_failure
-                notify_preflight_failure(["Notice site credentials missing"])
+                notify_preflight_failure(preflight_failures)
             except Exception:
                 pass
-            await Actor.fail(status_message="Missing SiftStack credentials")
+            await Actor.fail(status_message=f"Preflight failed: {'; '.join(preflight_failures)}")
             return
-        if not config.CAPTCHA_API_KEY:
-            Actor.log.warning("captcha_api_key not set — CAPTCHA solving will fail")
+        Actor.log.info("Preflight checks passed")
 
         # Filter searches
         searches = _filter_searches(counties, types)
@@ -367,6 +377,14 @@ async def actor_main() -> None:
                     Actor.log.info("Daily mode: no stored last_run_date, defaulting to 7 days")
 
             # ── Load cross-run seen-ID cache from KVS (makes daily re-runs idempotent) ──
+            # KNOWN GAP (tracked separately, not fixed as of 2026-07-24): this KVS-backed
+            # cache is entirely separate from the CLI path's local seen_ids.json — the two
+            # do not share state. Running the CLI manually (e.g. for ad-hoc testing) does
+            # not mark notices as seen for the scheduled Actor, and vice versa. If both
+            # paths are ever used against the same counties in the same window, expect
+            # either re-scraping or, in principle, a missed dedup — not data loss, but
+            # worth knowing before treating "0 new notices" from one path as authoritative
+            # for the other.
             seen_ids = await kvs.get_value("seen_notice_ids") or {}
             Actor.log.info("Loaded %d previously-seen notice IDs from KVS", len(seen_ids))
 

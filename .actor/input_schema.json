@@ -23,9 +23,9 @@
         "types": {
             "title": "Notice Types",
             "type": "array",
-            "description": "Notice types to scrape. Currently only foreclosure is supported.",
+            "description": "Notice types to scrape. Leave empty for all types configured in each county's saved searches (currently all 4 live MO counties are probate-only — see COUNTIES in src/config.py).",
             "items": { "type": "string" },
-            "default": ["foreclosure"],
+            "default": [],
             "editor": "stringList"
         },
         "since_date": {
@@ -138,6 +138,20 @@
             "title": "Trestle API Key",
             "type": "string",
             "description": "API key from trestleiq.com for phone validation scoring. Assigns 5-tier dial priority to phone numbers. Optional.",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "ancestry_email": {
+            "title": "Ancestry.com Email",
+            "type": "string",
+            "description": "Login email for Ancestry.com. Used as a fallback deceased-owner/DOD lookup (SSDI) when court-record and obituary search don't resolve a match. Optional.",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "ancestry_password": {
+            "title": "Ancestry.com Password",
+            "type": "string",
+            "description": "Login password for Ancestry.com. Required if ancestry_email is set.",
             "editor": "textfield",
             "isSecret": true
         },
