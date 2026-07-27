@@ -358,23 +358,43 @@ async def run_saved_search(
             # reliably as MO's). Verify the page number actually advanced;
             # retry the click a few times before giving up.
             page_before = current_page
+            advance_failed = False
             for attempt in range(1, 5):
-                await next_btn.click()
-                await page.wait_for_load_state("load")
-                # "load" alone isn't enough after many postbacks in one
-                # session (confirmed live 2026-07-22 — this got flakier
-                # the more notices had already been go_back()'d through on
-                # this page, consistent with ASP.NET ViewState/postback
-                # state getting slower to settle deep into a long session).
-                # networkidle is best-effort here since a still-loading
-                # results grid can keep background requests going.
+                # Wrapped in try/except (added 2026-07-27 after a live 2am run
+                # lost an entire search's accumulated `notices` list to this
+                # exact call): a hung/slow session after heavy CAPTCHA-solving
+                # delays can make next_btn.click() itself raise PwTimeout,
+                # which — unguarded — propagates straight out of
+                # run_saved_search before it ever reaches `return notices`,
+                # silently discarding every notice already scraped on earlier
+                # pages of this same search. Treat a raised exception here
+                # exactly like "click didn't advance the page": fall through
+                # to the stuck-after-4-attempts path below, which breaks the
+                # outer loop and returns whatever notices were already
+                # collected instead of throwing them away.
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=10000)
+                    await next_btn.click()
+                    await page.wait_for_load_state("load")
+                    # "load" alone isn't enough after many postbacks in one
+                    # session (confirmed live 2026-07-22 — this got flakier
+                    # the more notices had already been go_back()'d through on
+                    # this page, consistent with ASP.NET ViewState/postback
+                    # state getting slower to settle deep into a long session).
+                    # networkidle is best-effort here since a still-loading
+                    # results grid can keep background requests going.
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+                    await delay()
+                    await delay()
+                    current_page, total_pages = await _get_page_info(page)
                 except Exception:
-                    pass
-                await delay()
-                await delay()
-                current_page, total_pages = await _get_page_info(page)
+                    logger.warning(
+                        "  Next-page click raised an error on page %d (attempt %d/4) — retrying",
+                        page_before, attempt, exc_info=True,
+                    )
+                    current_page = page_before  # force the "didn't advance" branch below
                 if current_page != page_before:
                     break
                 logger.warning(
@@ -385,13 +405,19 @@ async def run_saved_search(
                 # still-processing postback more time rather than
                 # immediately re-clicking into the same in-flight state.
                 await asyncio.sleep(3)
-                next_btn = await page.query_selector(SEL_NEXT_PAGE_BUTTON)
+                try:
+                    next_btn = await page.query_selector(SEL_NEXT_PAGE_BUTTON)
+                except Exception:
+                    next_btn = None
                 if not next_btn:
                     break
             if current_page == page_before:
                 logger.error(
-                    "  Next-page click stuck on page %d after 4 attempts — stopping", page_before,
+                    "  Next-page click stuck on page %d after 4 attempts — stopping "
+                    "(returning %d notices collected so far)", page_before, len(notices),
                 )
+                advance_failed = True
+            if advance_failed:
                 break
         else:
             # Grid lost or next button missing — attempt recovery to next page

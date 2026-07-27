@@ -49,6 +49,19 @@ TURNSTILE_POLL_TIMEOUT = 90.0     # give up waiting on the solve after this long
 TURNSTILE_CLEAR_TIMEOUT_MS = 15_000  # wait for widget/content state after injecting token
 TURNSTILE_AGREE_TIMEOUT_MS = 15_000  # wait for content after clicking "I Agree, View Notice"
 
+# Added 2026-07-27 after a live 2am run burned ~13 minutes stuck on 2 notices
+# during a real 2Captcha overload (repeated ERROR_NO_SLOT_AVAILABLE plus
+# back-to-back 90s poll timeouts). MAX_RETRIES=3 here, multiplied by another
+# 3 retries at the scraper.py call-site, meant a single stuck notice could
+# cost up to 3 x 3 x 90s = 810s worst case. Once this call has already seen
+# one overload signal, there's little value in giving every subsequent
+# attempt a fresh full 90s — the service is demonstrably struggling right
+# now, and fast-failing is more useful than trying to be resilient this hard
+# on the presumption of transient, i.i.d. failures rather than a service-wide
+# outage.
+TURNSTILE_RETRY_POLL_TIMEOUT = 30.0  # shorter poll once this call has already hit trouble
+TURNSTILE_OVERLOAD_BACKOFF_SECONDS = 8.0  # pause before retrying after ERROR_NO_SLOT_AVAILABLE
+
 
 async def solve_captcha_and_view(page: Page) -> bool:
     """Detect which CAPTCHA (if any) guards this notice detail page and solve it.
@@ -276,8 +289,17 @@ async def _extract_turnstile_sitekey(page: Page) -> str | None:
         return None
 
 
+_OVERLOAD_SENTINEL = -1  # distinguishes "2Captcha itself is overloaded" from a generic createTask failure
+
+
 async def _create_turnstile_task(sitekey: str, url: str) -> int | None:
-    """POST /createTask with type TurnstileTaskProxyless. Returns taskId, or None on failure."""
+    """POST /createTask with type TurnstileTaskProxyless.
+
+    Returns taskId on success, None on a generic failure, or the sentinel
+    -1 specifically for ERROR_NO_SLOT_AVAILABLE — callers should treat that
+    as "the service is overloaded right now" and back off rather than
+    retrying instantly (added 2026-07-27, see TURNSTILE_OVERLOAD_BACKOFF_SECONDS).
+    """
     try:
         resp = await asyncio.to_thread(
             requests.post,
@@ -294,10 +316,13 @@ async def _create_turnstile_task(sitekey: str, url: str) -> int | None:
         )
         data = resp.json()
         if data.get("errorId"):
+            error_code = data.get("errorCode")
             logger.warning(
                 "2Captcha createTask error: %s (%s)",
-                data.get("errorCode"), data.get("errorDescription"),
+                error_code, data.get("errorDescription"),
             )
+            if error_code == "ERROR_NO_SLOT_AVAILABLE":
+                return _OVERLOAD_SENTINEL
             return None
         return data.get("taskId")
     except Exception:
@@ -305,9 +330,9 @@ async def _create_turnstile_task(sitekey: str, url: str) -> int | None:
         return None
 
 
-async def _poll_turnstile_result(task_id: int) -> str | None:
+async def _poll_turnstile_result(task_id: int, timeout: float = TURNSTILE_POLL_TIMEOUT) -> str | None:
     """Poll /getTaskResult until the Turnstile solve is ready or the poll times out."""
-    deadline = time.monotonic() + TURNSTILE_POLL_TIMEOUT
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         await asyncio.sleep(TURNSTILE_POLL_INTERVAL)
         try:
@@ -333,7 +358,7 @@ async def _poll_turnstile_result(task_id: int) -> str | None:
 
     logger.warning(
         "2Captcha Turnstile solve timed out after %.0fs (taskId=%s)",
-        TURNSTILE_POLL_TIMEOUT, task_id,
+        timeout, task_id,
     )
     return None
 
@@ -381,6 +406,12 @@ async def _solve_turnstile_and_view(page: Page) -> bool:
     MAX_RETRIES times on failure.
     """
     page_url = page.url
+    # Tracks whether this call has already seen a concrete sign that 2Captcha
+    # itself is struggling (overload error, or a prior poll that ran the full
+    # timeout without ever producing a token). Once true, subsequent attempts
+    # use a shorter poll timeout instead of a fresh 90s each time — see the
+    # TURNSTILE_RETRY_POLL_TIMEOUT docstring for why.
+    saw_trouble = False
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -406,11 +437,23 @@ async def _solve_turnstile_and_view(page: Page) -> bool:
                 page_url, attempt, MAX_RETRIES, sitekey,
             )
             task_id = await _create_turnstile_task(sitekey, page_url)
+            if task_id == _OVERLOAD_SENTINEL:
+                saw_trouble = True
+                logger.warning(
+                    "2Captcha has no solving slots available (attempt %d/%d) — "
+                    "backing off %.0fs before retrying instead of hammering an "
+                    "overloaded service",
+                    attempt, MAX_RETRIES, TURNSTILE_OVERLOAD_BACKOFF_SECONDS,
+                )
+                await asyncio.sleep(TURNSTILE_OVERLOAD_BACKOFF_SECONDS)
+                continue
             if not task_id:
                 continue
 
-            token = await _poll_turnstile_result(task_id)
+            poll_timeout = TURNSTILE_RETRY_POLL_TIMEOUT if saw_trouble else TURNSTILE_POLL_TIMEOUT
+            token = await _poll_turnstile_result(task_id, timeout=poll_timeout)
             if not token:
+                saw_trouble = True
                 logger.warning("2Captcha returned no Turnstile token (attempt %d)", attempt)
                 continue
 
