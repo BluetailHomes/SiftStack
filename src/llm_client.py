@@ -79,6 +79,21 @@ def _system_param(system: str, cache_system: bool):
     return system
 
 
+def _extract_response_text(content: list) -> str:
+    """Pull the text out of an Anthropic response's content blocks.
+
+    Added 2026-07-28. `response.content[0].text` blindly assumed the first
+    block was always a text block — breaks with `'ThinkingBlock' object has
+    no attribute 'text'` whenever a thinking block precedes the real text
+    block. This bug was invisible for an unknown stretch of time because
+    every call was failing at the auth layer (invalid API key) before ever
+    reaching this parsing step; it only surfaced once the key was fixed and
+    real 200s started coming back. Concatenates every block that actually
+    has `.text` (skips ThinkingBlock, tool-use blocks, etc.), in order.
+    """
+    return "".join(block.text for block in content if hasattr(block, "text"))
+
+
 def _chat_anthropic(
     prompt: str,
     system: str,
@@ -105,7 +120,7 @@ def _chat_anthropic(
             system=_system_param(system, cache_system),
             messages=[{"role": "user", "content": prompt}],
         )
-        result_text = response.content[0].text.strip()
+        result_text = _extract_response_text(response.content).strip()
         return _parse_json(result_text)
     except Exception as e:
         logger.warning("Anthropic LLM call failed: %s", e)
@@ -138,7 +153,7 @@ async def _chat_anthropic_async(
             system=_system_param(system, cache_system),
             messages=[{"role": "user", "content": prompt}],
         )
-        result_text = response.content[0].text.strip()
+        result_text = _extract_response_text(response.content).strip()
         return _parse_json(result_text)
     except Exception as e:
         logger.warning("Anthropic async LLM call failed: %s", e)
