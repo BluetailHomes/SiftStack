@@ -20,6 +20,7 @@ import anthropic
 from ddgs import DDGS
 
 import config
+from llm_client import _extract_response_text
 from notice_parser import NoticeData
 
 logger = logging.getLogger(__name__)
@@ -239,7 +240,7 @@ def _parse_entity_with_llm(
             system=[{"type": "text", "text": ENTITY_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": prompt}],
         )
-        result_text = response.content[0].text.strip()
+        result_text = _extract_response_text(response.content).strip()
         # Strip markdown code fences if present
         result_text = re.sub(r"^```(?:json)?\s*", "", result_text)
         result_text = re.sub(r"\s*```$", "", result_text)

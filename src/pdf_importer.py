@@ -15,6 +15,7 @@ import pypdfium2 as pdfium
 from PIL import Image
 
 import config
+from llm_client import _extract_response_text
 from notice_parser import NoticeData
 from image_utils import fix_rotation, ocr_page
 
@@ -139,7 +140,7 @@ def parse_page_llm(ocr_text: str, county: str, api_key: str) -> list[dict]:
             }],
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = response.content[0].text.strip()
+        raw = _extract_response_text(response.content).strip()
         # Strip markdown fences if present
         if raw.startswith("```"):
             raw = re.sub(r"^```\w*\n?", "", raw)
