@@ -301,11 +301,22 @@ COUNTIES: dict[str, CountyProfile] = {
     # ── New Mexico — config-ready, blocked on pagination (see notes) ────
     "bernalillo": CountyProfile(
         county="Bernalillo", state="NM", state_full="New Mexico",
-        notice_platform="newmexicopublicnotices", scraper_ready=True, active=False,
+        notice_platform="newmexicopublicnotices", scraper_ready=True, active=True,
         major_city="Albuquerque", zip_prefixes=["871", "870"],
         assessor_url="https://www.bernco.gov/assessor/",
         court_records_url="https://caselookup.nmcourts.gov/",
-        notes="Same vendor (lrsws.co) as tnpublicnotice.com. Confirmed live 2026-07-22: login works "
+        notes="Flipped active=True 2026-08-01: a manual local run (post pagination-retry hardening, "
+              "commit 'Harden pagination retry...') scraped 51 raw notices across 4 full pages — the "
+              "first real validated output past page 1 ever produced for this county — and exported "
+              "41 fully validated, mailable, obituary-confirmed records (output/tn_notices_2026-08-"
+              "01_102247.csv). Stopped gracefully on page 5's pagination recovery limit rather than "
+              "losing data, so pagination is meaningfully better but not yet perfect. This flag flip "
+              "is documentation-only — 'active' is not read anywhere else in the codebase as a "
+              "functional gate (confirmed 2026-08-01); there is NOT yet a real scheduled Apify Task "
+              "for NM (it runs on notice_platform=newmexicopublicnotices, a different platform than "
+              "the MO daily schedule, so it needs its own Task) — deliberately not set up yet pending "
+              "a look at why the same run's Sandoval saved search returned zero records. "
+              "Same vendor (lrsws.co) as tnpublicnotice.com. Confirmed live 2026-07-22: login works "
               "(the earlier failure was a temporary rate-limit, not a real credential/bot-detection "
               "issue) and login form field IDs match MO exactly, but SEL_SAVED_SEARCHES_DROPDOWN's "
               "exact ID did NOT (different master-page ContentPlaceHolder nesting — fixed to a suffix "
@@ -314,19 +325,19 @@ COUNTIES: dict[str, CountyProfile] = {
               "representative/notice to creditors) — see SAVED_SEARCHES below; a \"foreclosure\" saved "
               "search also already exists on the account (same two-county scope) but isn't wired into "
               "SAVED_SEARCHES yet. probate_filter.py (noise filter) and the relaxed PR-address "
-              "validation are both built and verified. NOT YET LIVE — blocked on intermittent "
-              "pagination past page 1 (ASP.NET postback/ViewState reliability degrades deeper into a "
-              "session; MO confirmed unaffected via its own production logs). No live run has yet "
-              "produced real validated output beyond page 1 — leave active=False until that's "
-              "resolved. Open lead for whoever picks this up: repeated test reruns accumulate a large "
-              "seen_ids skip-cache, producing a fast go_back()-heavy access pattern on page 1 that may "
-              "be more adversarial than normal daily production runs (where most rows are genuinely "
-              "new and get natural pacing from a real CAPTCHA solve between interactions) — worth "
-              "testing whether a clean run (or one seeded with fewer skips) is actually more reliable "
-              "before assuming the postback fix itself is insufficient. Probate case coverage on "
-              "caselookup.nmcourts.gov is district-court only; NM often handles routine probate "
-              "through an independent county Probate Court — verify separately. ArcGIS Open Data Hub "
-              "parcel layers available as a closer-to-API assessor option.",
+              "validation are both built and verified. Historical blocker (resolved 2026-08-01, see "
+              "top of this note): pagination past page 1 was previously unreliable enough that no live "
+              "run had ever produced validated output beyond page 1 — the 2026-08-01 pagination-retry "
+              "hardening (fresh next-page button re-query every attempt, explicit 15s click timeout, "
+              "extra pacing on the seen-notice skip path) fixed that. The \"skip-cache hypothesis\" "
+              "flagged here previously — that repeated test reruns accumulate a large seen_ids cache, "
+              "producing an abnormally fast go_back()-heavy access pattern versus real production "
+              "traffic — is exactly what the new skip-path pacing targets; not yet isolated as THE "
+              "specific cause versus the button re-query/timeout fix, since both landed together. "
+              "Probate case coverage on caselookup.nmcourts.gov is district-court only; NM often "
+              "handles routine probate through an independent county Probate Court — verify "
+              "separately. ArcGIS Open Data Hub parcel layers available as a closer-to-API assessor "
+              "option.",
     ),
     "sandoval": CountyProfile(
         county="Sandoval", state="NM", state_full="New Mexico",
@@ -334,9 +345,13 @@ COUNTIES: dict[str, CountyProfile] = {
         major_city="Rio Rancho", zip_prefixes=["870", "871"],
         assessor_url="https://eaweb.sandovalcountynm.gov/Assessor",
         court_records_url="https://caselookup.nmcourts.gov/",
-        notes="Same caveats as Bernalillo — shares the same \"probate\" saved search (covers both "
-              "counties in one query). NOT YET LIVE — see Bernalillo's notes for the pagination "
-              "blocker; leave active=False until resolved.",
+        notes="Deliberately still active=False as of 2026-08-01, unlike Bernalillo (see its notes for "
+              "the pagination fix that just landed) — the same 2026-08-01 manual test run that produced "
+              "41 validated Bernalillo records returned ZERO Sandoval records, despite both counties "
+              "sharing the one 'probate' saved search. Not yet root-caused: could mean genuinely no new "
+              "Sandoval filings in the scraped window, or Sandoval candidates specifically falling out "
+              "somewhere in filtering/validation. Investigate before flipping active=True — don't infer "
+              "Sandoval works just because Bernalillo did in the same run.",
     ),
     # ── Oklahoma — NOT scraper-compatible with the current automation ──
     "oklahoma": CountyProfile(
