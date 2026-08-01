@@ -753,18 +753,52 @@ _COURTHOUSE_COUNTY_RE = re.compile(
 _TARGET_COUNTIES = set(config.COUNTIES.keys())
 
 
-def is_target_county(text: str, search_county: str) -> bool:
-    """Check if the notice's actual property county matches our target counties.
+# Rejoin words split by a line-wrap hyphen (PDF text-extraction artifact),
+# e.g. "Ber-\nnalillo County Courthouse" → "Bernalillo County Courthouse".
+# Without this, _COURTHOUSE_COUNTY_RE's \s+ matches across the newline and
+# captures only the back half of the word ("Nalillo" instead of
+# "Bernalillo") — confirmed live 2026-08-01 on two genuine Bernalillo
+# notices in the NM test run. Applied only within county resolution below,
+# not to notice.raw_text globally, to keep the blast radius small.
+_LINE_WRAP_HYPHEN_RE = re.compile(r"-\s*\n\s*")
+
+
+def _dehyphenate(text: str) -> str:
+    return _LINE_WRAP_HYPHEN_RE.sub("", text)
+
+
+def resolve_notice_county(text: str, search_county: str) -> tuple[bool, str | None]:
+    """Determine whether to keep a notice, and which target county it's really in.
 
     The search may return notices that merely *mention* a nearby county (e.g. the
     trustee is from a different county) but the actual property is elsewhere.
     We detect this by looking at Register's Office and Courthouse references
     which indicate where the property actually is.
 
-    Returns True if the property appears to be in one of our operating counties
-    (see config.COUNTIES), or if we can't determine the county (benefit of the
-    doubt).
+    This also fixes a distinct mislabeling bug (found live 2026-08-01): a
+    single saved search can cover more than one target county at once — e.g.
+    NM's "probate" search covers both Bernalillo and Sandoval, collapsed to
+    one SavedSearch entry by main.py's _dedupe_by_saved_search_name(). The
+    caller (scraper.py) hard-sets notice.county from search_county *before*
+    this check ever runs, so a genuine Sandoval notice was being kept (it
+    does mention a valid target county) but permanently mislabeled
+    "Bernalillo" — it never showed up in the wrong-county filter log because
+    it was never rejected, just misattributed. Re-deriving the county from
+    the notice's own text (instead of trusting search_county unconditionally)
+    fixes that.
+
+    Returns (keep, resolved_county):
+    - keep=False means the property is confirmed to be in a non-target
+      county — filter it out. resolved_county is None in that case.
+    - keep=True with resolved_county set to the county the notice text
+      actually names, when exactly one target county is mentioned. Falls
+      back to search_county when we can't determine one (no county
+      mentioned) or when the mention is genuinely ambiguous (more than one
+      distinct target county named in the same notice) — benefit of the
+      doubt, don't guess.
     """
+    text = _dehyphenate(text)
+
     # Find all Register's Office mentions — the first one is typically the
     # property's recording county (later mentions may be trustee appointments)
     register_matches = _REGISTER_COUNTY_RE.findall(text)
@@ -778,18 +812,38 @@ def is_target_county(text: str, search_county: str) -> bool:
         mentioned_counties.add(c.lower())
 
     if not mentioned_counties:
-        return True  # Can't determine — keep it
+        return True, search_county  # Can't determine — keep it, keep the label
 
-    # If ANY of our target counties appear, keep the notice
-    if mentioned_counties & _TARGET_COUNTIES:
-        return True
+    target_matches = mentioned_counties & _TARGET_COUNTIES
 
-    # Only non-target counties found — this is a false positive
-    logger.info(
-        "County mismatch: search='%s' but property in %s — filtering out",
-        search_county, ", ".join(sorted(mentioned_counties)).title(),
-    )
-    return False
+    if not target_matches:
+        # Only non-target counties found — this is a false positive
+        logger.info(
+            "County mismatch: search='%s' but property in %s — filtering out",
+            search_county, ", ".join(sorted(mentioned_counties)).title(),
+        )
+        return False, None
+
+    if len(target_matches) == 1:
+        resolved = next(iter(target_matches)).title()
+        if resolved.lower() != search_county.lower():
+            logger.info(
+                "County re-labeled: search='%s' but notice text names '%s' — "
+                "using the text-derived county (shared saved search covering "
+                "multiple target counties)",
+                search_county, resolved,
+            )
+        return True, resolved
+
+    # More than one distinct target county mentioned in the same notice —
+    # genuinely ambiguous, don't guess which one is right.
+    return True, search_county
+
+
+def is_target_county(text: str, search_county: str) -> bool:
+    """Backward-compatible True/False wrapper around resolve_notice_county()."""
+    keep, _ = resolve_notice_county(text, search_county)
+    return keep
 
 
 # ── Main parser ───────────────────────────────────────────────────────

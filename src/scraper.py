@@ -39,7 +39,7 @@ from config import (
 from data_formatter import _notice_id_from_url
 from foreclosure_filter import is_valid_foreclosure
 from probate_filter import is_valid_probate
-from notice_parser import NoticeData, is_target_county, parse_notice_page
+from notice_parser import NoticeData, resolve_notice_county, parse_notice_page
 
 logger = logging.getLogger(__name__)
 
@@ -660,10 +660,26 @@ async def _scrape_results_page(
                 elif not is_valid_probate(notice):
                     logger.debug("  Filtered out (not probate): %s", notice.source_url)
                 # Apply county validation — reject notices where the property
-                # is actually in a different county (search false positive)
-                elif not is_target_county(notice.raw_text, search.county):
+                # is actually in a different county (search false positive).
+                # Also re-derives notice.county from the notice's own text
+                # rather than trusting search.county unconditionally, since a
+                # single saved search can cover more than one target county
+                # at once (e.g. NM's "probate" search covers both Bernalillo
+                # and Sandoval, collapsed to one SavedSearch entry by
+                # main.py's _dedupe_by_saved_search_name()) — fixed 2026-08-01
+                # after real Sandoval notices were found silently mislabeled
+                # "Bernalillo" rather than rejected.
+                elif not (keep_result := resolve_notice_county(notice.raw_text, search.county))[0]:
                     logger.debug("  Filtered out (wrong county): %s", notice.source_url)
                 else:
+                    resolved_county = keep_result[1]
+                    if resolved_county and resolved_county != notice.county:
+                        logger.info(
+                            "  Re-labeling notice county: %s -> %s (%s)",
+                            notice.county, resolved_county, notice.source_url,
+                        )
+                        notice.county = resolved_county
+                        notice.state = config.state_for_county(resolved_county)
                     notices.append(notice)
                     logger.debug("  Kept notice: %s", notice.source_url)
 
