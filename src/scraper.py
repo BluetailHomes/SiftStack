@@ -360,6 +360,29 @@ async def run_saved_search(
             page_before = current_page
             advance_failed = False
             for attempt in range(1, 5):
+                # Re-query the button fresh on EVERY attempt, including the
+                # first (added 2026-07-28). Previously the first attempt
+                # reused the handle queried back at the top of the loop,
+                # before this page's per-notice go_back() cycling finished —
+                # if that cycling caused a full grid re-render, the handle
+                # could point at a stale/hidden DOM node. That's the likely
+                # cause of the "element is not visible ... 112x waiting"
+                # 60-second click timeouts observed live on 2026-07-28: the
+                # click never raised an error, it just spun for the full
+                # default 60s timeout before Playwright gave up. A fresh
+                # query costs one cheap round-trip and removes that failure
+                # class entirely.
+                try:
+                    next_btn = await page.query_selector(SEL_NEXT_PAGE_BUTTON)
+                except Exception:
+                    next_btn = None
+                if not next_btn:
+                    logger.warning(
+                        "  Next-page button missing on page %d (attempt %d/4) — retrying",
+                        page_before, attempt,
+                    )
+                    await asyncio.sleep(3)
+                    continue
                 # Wrapped in try/except (added 2026-07-27 after a live 2am run
                 # lost an entire search's accumulated `notices` list to this
                 # exact call): a hung/slow session after heavy CAPTCHA-solving
@@ -373,7 +396,14 @@ async def run_saved_search(
                 # outer loop and returns whatever notices were already
                 # collected instead of throwing them away.
                 try:
-                    await next_btn.click()
+                    # Explicit 15s timeout (added 2026-07-28) instead of
+                    # inheriting the context's 60s default — a click that's
+                    # genuinely stuck (element never becomes visible/stable)
+                    # should fail fast and get a fresh re-query + retry
+                    # rather than burning up to 4x60s (4+ minutes) before
+                    # this loop gives up on a page that might recover within
+                    # seconds on a clean attempt.
+                    await next_btn.click(timeout=15_000)
                     await page.wait_for_load_state("load")
                     # "load" alone isn't enough after many postbacks in one
                     # session (confirmed live 2026-07-22 — this got flakier
@@ -405,12 +435,6 @@ async def run_saved_search(
                 # still-processing postback more time rather than
                 # immediately re-clicking into the same in-flight state.
                 await asyncio.sleep(3)
-                try:
-                    next_btn = await page.query_selector(SEL_NEXT_PAGE_BUTTON)
-                except Exception:
-                    next_btn = None
-                if not next_btn:
-                    break
             if current_page == page_before:
                 logger.error(
                     "  Next-page click stuck on page %d after 4 attempts — stopping "
@@ -579,6 +603,19 @@ async def _scrape_results_page(
                     logger.info("  Skipping already-processed notice ID=%s", notice_id)
                     await page.go_back()
                     await page.wait_for_load_state("networkidle")
+                    # Extra pacing beyond the normal delay() specifically on
+                    # this skip path (added 2026-07-28 — testing the
+                    # "skip-cache hypothesis" noted in config.py's Bernalillo
+                    # profile). A real notice gets natural pacing from an
+                    # actual CAPTCHA solve (~15-30s) between go_back() calls;
+                    # an already-seen notice skips that entirely. A search
+                    # with a large accumulated seen_ids cache (e.g. from
+                    # repeated test reruns) can therefore go_back() through
+                    # many rows far faster than any real production run
+                    # ever would — plausibly more adversarial to ASP.NET's
+                    # ViewState/postback state than the traffic pattern this
+                    # scraper was actually built and tested against.
+                    await delay()
                     await delay()
                     break  # next result
 
@@ -758,7 +795,10 @@ async def _recover_to_search_page(
             if not next_btn:
                 logger.error("Next page button not found during recovery at page %d", current)
                 return False
-            await next_btn.click()
+            # Same explicit short timeout as the main pagination loop above
+            # (added 2026-07-28) — fail fast on a stuck click during
+            # recovery rather than inheriting the context's 60s default.
+            await next_btn.click(timeout=15_000)
             await page.wait_for_load_state("load")
             await delay()
             await delay()
