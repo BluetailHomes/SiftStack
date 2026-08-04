@@ -955,6 +955,92 @@ async def _try_extract_pdf_text(page: Page) -> str:
     return ""
 
 
+async def extract_notice_fields(
+    notice: NoticeData, llm_api_key: str | None = None,
+) -> NoticeData:
+    """Populate structured fields on a NoticeData that already has raw_text,
+    county, notice_type, and source_url set.
+
+    Regex parsing first, with an LLM fallback (Claude Haiku) for whatever
+    the regex parser couldn't find. Split out 2026-08-04 from
+    parse_notice_page() so this logic — previously only reachable via a live
+    Playwright `page` object — can also be used by scrapers that already
+    have plain notice text from another source, e.g. scraper_ks.py, which
+    gets its text via pdfminer from a downloaded newspaper-page PDF rather
+    than a live browser page (kansaspublicnotices.com has no notice detail
+    page / CAPTCHA at all — see docs/OK_KS_SCRAPER_FEASIBILITY.md).
+    parse_notice_page() below is unchanged in behavior; it just delegates
+    the second half of its work to this function now.
+    """
+    if not notice.raw_text.strip():
+        return notice
+
+    # ── Extract fields from the notice body text ───────────────────
+    _parse_address(notice)
+    _parse_name(notice)
+    _parse_pr_address(notice)
+    if notice.notice_type != "probate":
+        _parse_auction_date(notice)
+
+    # For probate, skip the LLM fallback entirely on notices that don't
+    # even look like a real estate-administration filing — e.g. NM's
+    # "probate" saved search matches loosely and pulls in city council
+    # agendas, civil suits, and storage auctions (confirmed live
+    # 2026-07-22), each of which would otherwise cost a real LLM call for
+    # nothing. is_valid_probate() is checked again post-parse in
+    # scraper.py (defense in depth, same pattern as is_valid_foreclosure),
+    # but skipping the LLM call here is where the actual cost is saved.
+    # Local import to avoid a circular import (probate_filter imports
+    # NoticeData from this module).
+    if notice.notice_type == "probate":
+        from probate_filter import is_valid_probate
+        if not is_valid_probate(notice):
+            logger.debug("Skipping LLM fallback — not a real probate notice: %s", notice.source_url)
+            return notice
+
+    # ── LLM fallback for missing fields ──────────────────────────
+    needs_llm = (
+        (notice.notice_type == "probate" and (not notice.owner_name or not notice.decedent_name or not notice.owner_street))
+        or (notice.notice_type != "probate" and (not notice.address or not notice.owner_name or not notice.auction_date))
+    )
+    if llm_api_key and needs_llm:
+        from llm_parser import extract_with_llm
+
+        llm_result = await extract_with_llm(
+            notice.raw_text, notice.notice_type, notice.county, llm_api_key,
+        )
+
+        if notice.notice_type == "probate":
+            # Probate: fill decedent name, PR name, and PR mailing address
+            if not notice.decedent_name and llm_result.get("decedent_name"):
+                notice.decedent_name = llm_result["decedent_name"]
+                logger.info("LLM filled decedent: %s", notice.decedent_name)
+            if not notice.owner_name and llm_result.get("owner_name"):
+                notice.owner_name = llm_result["owner_name"]
+                logger.info("LLM filled PR: %s", notice.owner_name)
+            if not notice.owner_street and llm_result.get("owner_street"):
+                notice.owner_street = llm_result["owner_street"]
+                notice.owner_city = llm_result.get("owner_city") or notice.owner_city
+                notice.owner_state = llm_result.get("owner_state") or notice.state
+                notice.owner_zip = llm_result.get("owner_zip") or notice.owner_zip
+                logger.info("LLM filled PR address: %s", notice.owner_street)
+        else:
+            # Foreclosure / tax sale / tax lien
+            if not notice.address and llm_result.get("address"):
+                notice.address = llm_result["address"]
+                notice.city = llm_result.get("city") or notice.city
+                notice.zip = llm_result.get("zip") or notice.zip
+                logger.info("LLM filled address: %s", notice.address)
+            if not notice.owner_name and llm_result.get("owner_name"):
+                notice.owner_name = llm_result["owner_name"]
+                logger.info("LLM filled owner: %s", notice.owner_name)
+            if not notice.auction_date and llm_result.get("auction_date"):
+                notice.auction_date = llm_result["auction_date"]
+                logger.info("LLM filled auction_date: %s", notice.auction_date)
+
+    return notice
+
+
 async def parse_notice_page(
     page: Page, county: str, notice_type: str, llm_api_key: str | None = None,
 ) -> NoticeData:
@@ -995,70 +1081,7 @@ async def parse_notice_page(
     # ── Extract structured metadata from labels ────────────────────
     notice.date_added = _extract_publish_date(full_text)
 
-    # ── Extract fields from the notice body text ───────────────────
-    _parse_address(notice)
-    _parse_name(notice)
-    _parse_pr_address(notice)
-    if notice_type != "probate":
-        _parse_auction_date(notice)
-
-    # For probate, skip the LLM fallback entirely on notices that don't
-    # even look like a real estate-administration filing — e.g. NM's
-    # "probate" saved search matches loosely and pulls in city council
-    # agendas, civil suits, and storage auctions (confirmed live
-    # 2026-07-22), each of which would otherwise cost a real LLM call for
-    # nothing. is_valid_probate() is checked again post-parse in
-    # scraper.py (defense in depth, same pattern as is_valid_foreclosure),
-    # but skipping the LLM call here is where the actual cost is saved.
-    # Local import to avoid a circular import (probate_filter imports
-    # NoticeData from this module).
-    if notice_type == "probate":
-        from probate_filter import is_valid_probate
-        if not is_valid_probate(notice):
-            logger.debug("Skipping LLM fallback — not a real probate notice: %s", notice.source_url)
-            return notice
-
-    # ── LLM fallback for missing fields ──────────────────────────
-    needs_llm = (
-        (notice_type == "probate" and (not notice.owner_name or not notice.decedent_name or not notice.owner_street))
-        or (notice_type != "probate" and (not notice.address or not notice.owner_name or not notice.auction_date))
-    )
-    if llm_api_key and needs_llm:
-        from llm_parser import extract_with_llm
-
-        llm_result = await extract_with_llm(
-            notice.raw_text, notice_type, county, llm_api_key,
-        )
-
-        if notice_type == "probate":
-            # Probate: fill decedent name, PR name, and PR mailing address
-            if not notice.decedent_name and llm_result.get("decedent_name"):
-                notice.decedent_name = llm_result["decedent_name"]
-                logger.info("LLM filled decedent: %s", notice.decedent_name)
-            if not notice.owner_name and llm_result.get("owner_name"):
-                notice.owner_name = llm_result["owner_name"]
-                logger.info("LLM filled PR: %s", notice.owner_name)
-            if not notice.owner_street and llm_result.get("owner_street"):
-                notice.owner_street = llm_result["owner_street"]
-                notice.owner_city = llm_result.get("owner_city") or notice.owner_city
-                notice.owner_state = llm_result.get("owner_state") or notice.state
-                notice.owner_zip = llm_result.get("owner_zip") or notice.owner_zip
-                logger.info("LLM filled PR address: %s", notice.owner_street)
-        else:
-            # Foreclosure / tax sale / tax lien
-            if not notice.address and llm_result.get("address"):
-                notice.address = llm_result["address"]
-                notice.city = llm_result.get("city") or notice.city
-                notice.zip = llm_result.get("zip") or notice.zip
-                logger.info("LLM filled address: %s", notice.address)
-            if not notice.owner_name and llm_result.get("owner_name"):
-                notice.owner_name = llm_result["owner_name"]
-                logger.info("LLM filled owner: %s", notice.owner_name)
-            if not notice.auction_date and llm_result.get("auction_date"):
-                notice.auction_date = llm_result["auction_date"]
-                logger.info("LLM filled auction_date: %s", notice.auction_date)
-
-    return notice
+    return await extract_notice_fields(notice, llm_api_key)
 
 
 # ── Metadata extractors ──────────────────────────────────────────────

@@ -44,7 +44,7 @@ NOTICE_PLATFORMS: dict[str, str] = {
     "mopublicnotices": "https://www.mopublicnotices.com",
     "newmexicopublicnotices": "https://www.newmexicopublicnotices.com",
     "oklahomanotices": "https://www.oklahomanotices.com",
-    "kansaspublicnotices": "https://www.kansaspublicnotices.com",
+    "kansaspublicnotices": "https://kansaspublicnotices.com",
     "tnpublicnotice": "https://www.tnpublicnotice.com",
 }
 
@@ -385,17 +385,31 @@ COUNTIES: dict[str, CountyProfile] = {
         court_records_url="https://www.oscn.net/dockets/Search.aspx",
         notes="Same caveats as Oklahoma County (not scraper-compatible yet).",
     ),
-    # ── Kansas — NOT scraper-compatible with the current automation ────
+    # ── Kansas — dedicated scraper built 2026-08-04, not yet live-tested ──
     "johnson": CountyProfile(
         county="Johnson", state="KS", state_full="Kansas",
-        notice_platform="kansaspublicnotices", scraper_ready=False, active=False,
+        notice_platform="kansaspublicnotices", scraper_ready=True, active=False,
         major_city="Olathe", zip_prefixes=["660", "661", "662"],
         assessor_url="https://www.jocogov.org/department/appraiser/property-data",
         court_records_url="https://www.kscourts.gov/eCourt/District-Court-Records",
-        notes="kansaspublicnotices.com runs on a 'NewzGroup'-family vendor (shared TLS cert with "
-              "kypublicnotice.com/ndpublicnotices.com) — different platform than this scraper automates. "
-              "Needs dedicated scraper development. Court records moved from a county-only terminal system "
-              "to the statewide Kansas eCourt portal in Nov 2024.",
+        notes="scraper_ready flipped True 2026-08-04 — src/scraper_ks.py built and dispatched from "
+              "main.py (config.NOTICE_PLATFORM == 'kansaspublicnotices' branches to it instead of "
+              "scraper.py's ASP.NET automation, which doesn't apply here). kansaspublicnotices.com is a "
+              "plain PHP/CodeIgniter form ('NewzGroup'-family vendor, shared TLS cert with "
+              "kypublicnotice.com/ndpublicnotices.com) with NO login and NO CAPTCHA — confirmed live "
+              "during the 2026-08-03 feasibility pass, see docs/OK_KS_SCRAPER_FEASIBILITY.md. Search "
+              "results are notice-level (excerpt + a 'View' link per notice) but the linked PDF is a "
+              "full physical newspaper page that can bundle several unrelated notices — scraper_ks.py's "
+              "_segment_notice_from_anchor() isolates just the one matching notice per result, anchored "
+              "primarily on the notice's own case/estate number (e.g. 'JO-2026-PR-000818') since that's "
+              "guaranteed unique on the page, with a word-window fallback for excerpts that don't carry "
+              "one. Verified via py_compile, the existing test suite, and unit-level checks against two "
+              "real downloaded pages (correctly isolated 2 distinct notices with zero cross-notice bleed, "
+              "including one page that also contained an unrelated city-council notice and a plain news "
+              "article) — but NOT YET run end-to-end against the live site (real search submission, "
+              "pagination, full pipeline through enrichment/CSV). Still active=False until that happens — "
+              "same precedent as Bernalillo before its 2026-08-01 live test. Court records moved from a "
+              "county-only terminal system to the statewide Kansas eCourt portal in Nov 2024.",
     ),
     # ── Tennessee — dormant/legacy, kept functional but inactive ───────
     "knox": CountyProfile(
@@ -453,8 +467,8 @@ STATE_NAMES: dict[str, str] = {p.state: p.state_full for p in COUNTIES.values()}
 # ── Saved Searches ─────────────────────────────────────────────────────
 # These names must match exactly what appears in the dropdown on the site.
 # Create the dropdown entries with these exact labels before the first real run.
-# Only ACTIVE + scraper_ready counties are included — Oklahoma/Kansas aren't
-# scrapable with the current automation yet.
+# Only ACTIVE + scraper_ready counties are included — Oklahoma isn't
+# scrapable with any current automation yet.
 #
 # New Mexico's "probate" entry is unusual: unlike MO's one-search-per-county
 # pattern, this single saved search on newmexicopublicnotices.com already
@@ -463,6 +477,14 @@ STATE_NAMES: dict[str, str] = {p.state: p.state_full for p in COUNTIES.values()}
 # per county), and main.py's _dedupe_by_saved_search_name() collapses them
 # back to one actual site search when both counties are requested together,
 # avoiding a redundant duplicate scrape of identical results.
+#
+# Johnson County (KS) doesn't have a real "saved search" concept at all —
+# kansaspublicnotices.com has no login/dropdown, just a live search form
+# (see scraper_ks.py). "probate" here is the literal free-text search term
+# submitted to that form, kept as a SavedSearch entry anyway (rather than a
+# separate data structure) purely so --counties/--types filtering and the
+# platform-dispatch machinery in main.py work the same way as every other
+# county without a special case.
 SAVED_SEARCHES: list[SavedSearch] = [
     SavedSearch("Jackson", "probate", "Jackson County Probate"),
     SavedSearch("Clay", "probate", "Clay County Probate"),
@@ -470,6 +492,7 @@ SAVED_SEARCHES: list[SavedSearch] = [
     SavedSearch("Cass", "probate", "Cass County Probate"),
     SavedSearch("Bernalillo", "probate", "probate"),
     SavedSearch("Sandoval", "probate", "probate"),
+    SavedSearch("Johnson", "probate", "probate"),
 ]
 
 # ── Entity Detection ──────────────────────────────────────────────────

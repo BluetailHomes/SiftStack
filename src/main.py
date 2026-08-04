@@ -119,7 +119,12 @@ def _preflight_check(mode: str) -> list[str]:
     enrichment_modes = scrape_modes | {"pdf-import", "photo-import", "dropbox-watch", "csv-import"}
     datasift_modes = {"manage-presets", "manage-sold", "phone-validate"}
 
-    if mode in scrape_modes:
+    # kansaspublicnotices.com has no login and no CAPTCHA (scraper_ks.py,
+    # confirmed live 2026-08-03 — see docs/OK_KS_SCRAPER_FEASIBILITY.md), so
+    # neither credential is actually required for a KS run. Without this
+    # carve-out, preflight would block every KS run on missing NOTICE_SITE_*/
+    # CAPTCHA_API_KEY env vars that this platform genuinely doesn't use.
+    if mode in scrape_modes and config.NOTICE_PLATFORM != "kansaspublicnotices":
         if not config.NOTICE_SITE_EMAIL or not config.NOTICE_SITE_PASSWORD:
             failures.append("NOTICE_SITE_EMAIL / NOTICE_SITE_PASSWORD not set (required for scraping)")
         if not config.CAPTCHA_API_KEY:
@@ -400,14 +405,39 @@ async def actor_main() -> None:
                     Actor.log.warning("Failed to persist seen_notice_ids to KVS: %s", e)
 
             # ── Scrape ────────────────────────────────────────────────
-            notices = await scrape_all(
-                mode=mode, searches=searches, proxy_url=proxy_url, on_batch=push_batch,
-                since_date_override=since_date_override or None,
-                llm_api_key=config.ANTHROPIC_API_KEY or None,
-                start_page=start_page,
-                seen_ids=seen_ids,
-                on_search_complete=persist_seen_ids,
-            )
+            # Same platform dispatch as the CLI path's _run_scrape_pipeline()
+            # — kansaspublicnotices runs on scraper_ks.py, not scraper.py's
+            # ASP.NET WebForms automation. No scheduled Apify Task exists for
+            # NM yet either though — same precedent applies here: this makes
+            # the Actor path correct/safe if someone points NOTICE_PLATFORM
+            # at kansaspublicnotices, but there's no scheduled KS Task set up
+            # (deliberately deferred, same as NM — see CLAUDE.md).
+            # scraper_ks.py doesn't need proxy_url/start_page/on_batch (no
+            # CAPTCHA-driven pagination limits or per-batch push logic there
+            # yet) — warn rather than silently drop them if set.
+            if config.NOTICE_PLATFORM == "kansaspublicnotices":
+                if proxy_url or start_page != 1:
+                    Actor.log.warning(
+                        "proxy_url/start_page are not supported by scraper_ks.py — ignoring "
+                        "for this kansaspublicnotices run",
+                    )
+                from scraper_ks import scrape_all_ks
+                notices = await scrape_all_ks(
+                    mode=mode, searches=searches,
+                    since_date_override=since_date_override or None,
+                    llm_api_key=config.ANTHROPIC_API_KEY or None,
+                    seen_ids=seen_ids,
+                )
+                await persist_seen_ids(seen_ids)
+            else:
+                notices = await scrape_all(
+                    mode=mode, searches=searches, proxy_url=proxy_url, on_batch=push_batch,
+                    since_date_override=since_date_override or None,
+                    llm_api_key=config.ANTHROPIC_API_KEY or None,
+                    start_page=start_page,
+                    seen_ids=seen_ids,
+                    on_search_complete=persist_seen_ids,
+                )
             # Handle async probate lookup before pipeline (requires await)
             probate_notices = [n for n in notices if n.notice_type == "probate" and n.decedent_name and not n.address]
             if probate_notices:
@@ -1804,14 +1834,31 @@ def cli_main() -> None:
 
 def _run_scrape_pipeline(args, searches) -> None:
     """Run the daily/historical scrape → enrich → export → upload pipeline."""
-    # Scrape
-    notices = asyncio.run(scrape_all(
-        mode=args.mode, searches=searches,
-        llm_api_key=config.ANTHROPIC_API_KEY or None,
-        since_date_override=args.since,
-        max_notices=args.max_notices,
-        headless=not args.headed,
-    ))
+    # Scrape — dispatch to the platform-appropriate scraper. kansaspublicnotices
+    # is a fundamentally different site (plain PHP form, no login/CAPTCHA, no
+    # ASP.NET postback) from the scraper.py automation MO/NM/TN share, so it
+    # gets its own module (scraper_ks.py) rather than trying to fit inside
+    # scraper.py's WebForms-specific flow. _filter_searches_by_platform()
+    # already guarantees `searches` only contains counties matching
+    # config.NOTICE_PLATFORM (one platform per run), so this dispatch is safe
+    # to key off that same value.
+    if config.NOTICE_PLATFORM == "kansaspublicnotices":
+        from scraper_ks import scrape_all_ks
+        notices = asyncio.run(scrape_all_ks(
+            mode=args.mode, searches=searches,
+            llm_api_key=config.ANTHROPIC_API_KEY or None,
+            since_date_override=args.since,
+            max_notices=args.max_notices,
+            headless=not args.headed,
+        ))
+    else:
+        notices = asyncio.run(scrape_all(
+            mode=args.mode, searches=searches,
+            llm_api_key=config.ANTHROPIC_API_KEY or None,
+            since_date_override=args.since,
+            max_notices=args.max_notices,
+            headless=not args.headed,
+        ))
     # Handle async probate lookup before pipeline (requires asyncio.run)
     probate_notices = [n for n in notices if n.notice_type == "probate" and n.decedent_name and not n.address]
     if probate_notices:
