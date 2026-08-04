@@ -747,6 +747,39 @@ _COURTHOUSE_COUNTY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "situated in {County} County" — legal-description phrasing for where the
+# property sits. Added 2026-08-03 after live-testing the county resolver
+# against real NM notice text: the original two patterns above matched zero
+# of the real Sandoval notices in the 2026-08-01 test run because NM's
+# notices use this phrasing (and "County of {County}" below) instead of
+# "Register's Office" / "County Courthouse" — so resolve_notice_county()
+# fell through to its "can't determine — keep the original label" branch
+# and the Bernalillo mislabel was silently preserved, exactly as before the
+# fix. Confirmed via live test with real notice text: 'situated in Sandoval
+# County, New Mexico' now matches.
+_SITUATED_COUNTY_RE = re.compile(
+    r"situated\s+in\s+(?:the\s+)?(\w+)\s+County",
+    re.IGNORECASE,
+)
+
+# "County of {County}" — common legal-description / venue phrasing, e.g.
+# "County of Sandoval, State of New Mexico". Added alongside
+# _SITUATED_COUNTY_RE above, same 2026-08-03 fix. Note this phrasing can
+# also appear in a notarization/acknowledgment block ("STATE OF X, COUNTY OF
+# Y") referring to where the document was *signed*, not where the property
+# sits — a real false-positive risk. We accept that risk because
+# resolve_notice_county() only uses this as one signal among several: if a
+# notary-block county and a real property county both get matched in the
+# same notice, mentioned_counties ends up with two distinct target
+# counties, which resolve_notice_county() treats as ambiguous and falls
+# back to keeping the original search-derived label — i.e. the failure
+# mode is "no relabel" (same as the pre-fix behavior), never a wrong
+# relabel.
+_COUNTY_OF_RE = re.compile(
+    r"County\s+of\s+(\w+)",
+    re.IGNORECASE,
+)
+
 # Counties we care about — notices for other counties are false positives.
 # Derived from config.COUNTIES so every operating market (active or dormant)
 # is recognized, instead of hardcoding a single market's county names.
@@ -799,30 +832,46 @@ def resolve_notice_county(text: str, search_county: str) -> tuple[bool, str | No
     """
     text = _dehyphenate(text)
 
-    # Find all Register's Office mentions — the first one is typically the
-    # property's recording county (later mentions may be trustee appointments)
+    # Find all Register's Office / Courthouse mentions — the first one is
+    # typically the property's recording county (later mentions may be
+    # trustee appointments). These two patterns are highly specific (legal
+    # recording/venue language) so they remain the sole basis for the
+    # *reject* decision below, unchanged from before this function grew the
+    # two broader patterns added just below.
     register_matches = _REGISTER_COUNTY_RE.findall(text)
     courthouse_matches = _COURTHOUSE_COUNTY_RE.findall(text)
+    narrow_counties = {c.lower() for c in register_matches + courthouse_matches}
 
-    # Collect unique county names from both patterns
-    mentioned_counties = set()
-    for c in register_matches:
-        mentioned_counties.add(c.lower())
-    for c in courthouse_matches:
-        mentioned_counties.add(c.lower())
+    # Broader phrasing patterns ("situated in X County", "County of X") —
+    # added 2026-08-03 after live-testing against real NM notice text showed
+    # the two narrow patterns above matched none of the real Sandoval
+    # notices, so no relabeling ever fired (they use "situated in Sandoval
+    # County" / "County of Sandoval" instead). These broader patterns are
+    # also common in a notarization/acknowledgment block ("STATE OF X,
+    # COUNTY OF Y") naming where the document was *signed* rather than
+    # where the property sits — a real false-positive risk. To keep that
+    # risk from ever causing a wrongful reject, these two patterns are only
+    # used to find a *relabel* target below, never to reject a notice
+    # outright — narrow_counties alone still drives the reject decision.
+    situated_matches = _SITUATED_COUNTY_RE.findall(text)
+    county_of_matches = _COUNTY_OF_RE.findall(text)
+    broad_counties = narrow_counties | {c.lower() for c in situated_matches + county_of_matches}
 
-    if not mentioned_counties:
-        return True, search_county  # Can't determine — keep it, keep the label
+    if narrow_counties:
+        narrow_target = narrow_counties & _TARGET_COUNTIES
+        if not narrow_target:
+            # Only non-target counties found via a high-confidence pattern —
+            # this is a genuine false positive.
+            logger.info(
+                "County mismatch: search='%s' but property in %s — filtering out",
+                search_county, ", ".join(sorted(narrow_counties)).title(),
+            )
+            return False, None
 
-    target_matches = mentioned_counties & _TARGET_COUNTIES
+    target_matches = broad_counties & _TARGET_COUNTIES
 
     if not target_matches:
-        # Only non-target counties found — this is a false positive
-        logger.info(
-            "County mismatch: search='%s' but property in %s — filtering out",
-            search_county, ", ".join(sorted(mentioned_counties)).title(),
-        )
-        return False, None
+        return True, search_county  # Can't determine — keep it, keep the label
 
     if len(target_matches) == 1:
         resolved = next(iter(target_matches)).title()
@@ -835,8 +884,8 @@ def resolve_notice_county(text: str, search_county: str) -> tuple[bool, str | No
             )
         return True, resolved
 
-    # More than one distinct target county mentioned in the same notice —
-    # genuinely ambiguous, don't guess which one is right.
+    # More than one distinct target county mentioned — genuinely ambiguous,
+    # don't guess which one is right.
     return True, search_county
 
 

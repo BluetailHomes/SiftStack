@@ -314,8 +314,9 @@ COUNTIES: dict[str, CountyProfile] = {
               "is documentation-only — 'active' is not read anywhere else in the codebase as a "
               "functional gate (confirmed 2026-08-01); there is NOT yet a real scheduled Apify Task "
               "for NM (it runs on notice_platform=newmexicopublicnotices, a different platform than "
-              "the MO daily schedule, so it needs its own Task) — deliberately not set up yet pending "
-              "a look at why the same run's Sandoval saved search returned zero records. "
+              "the MO daily schedule, so it needs its own Task) — deliberately not set up yet; that's "
+              "the next real step now that both counties are active and the mislabeling bug (see "
+              "Sandoval's notes) is fixed and live-confirmed. "
               "Same vendor (lrsws.co) as tnpublicnotice.com. Confirmed live 2026-07-22: login works "
               "(the earlier failure was a temporary rate-limit, not a real credential/bot-detection "
               "issue) and login form field IDs match MO exactly, but SEL_SAVED_SEARCHES_DROPDOWN's "
@@ -341,17 +342,29 @@ COUNTIES: dict[str, CountyProfile] = {
     ),
     "sandoval": CountyProfile(
         county="Sandoval", state="NM", state_full="New Mexico",
-        notice_platform="newmexicopublicnotices", scraper_ready=True, active=False,
+        notice_platform="newmexicopublicnotices", scraper_ready=True, active=True,
         major_city="Rio Rancho", zip_prefixes=["870", "871"],
         assessor_url="https://eaweb.sandovalcountynm.gov/Assessor",
         court_records_url="https://caselookup.nmcourts.gov/",
-        notes="Deliberately still active=False as of 2026-08-01, unlike Bernalillo (see its notes for "
-              "the pagination fix that just landed) — the same 2026-08-01 manual test run that produced "
-              "41 validated Bernalillo records returned ZERO Sandoval records, despite both counties "
-              "sharing the one 'probate' saved search. Not yet root-caused: could mean genuinely no new "
-              "Sandoval filings in the scraped window, or Sandoval candidates specifically falling out "
-              "somewhere in filtering/validation. Investigate before flipping active=True — don't infer "
-              "Sandoval works just because Bernalillo did in the same run.",
+        notes="Flipped active=True 2026-08-03, after root-causing and fixing the 2026-08-01 zero-records "
+              "result. Root cause (see CLAUDE.md 'Root cause found for Sandoval's zero-records result') "
+              "was a mislabeling bug, not a rejection bug: scraper.py hard-set notice.county from "
+              "search.county ('Bernalillo', the label that survives main.py's "
+              "_dedupe_by_saved_search_name() collapsing the two counties' shared 'probate' saved "
+              "search) before any county-match check ran, so real Sandoval notices passed the check "
+              "(Sandoval is a valid target county) but were already mislabeled Bernalillo by that point "
+              "— they never showed up in the wrong-county filter log because they were never rejected, "
+              "just misattributed. Fixed via notice_parser.resolve_notice_county(), which re-derives the "
+              "notice's actual county from its own text (Register's-Office/Courthouse patterns, plus a "
+              "round-2 addition of 'situated in X County' / 'County of X' phrasing after round 1's "
+              "narrower patterns matched none of the real Sandoval notices) and overrides notice.county "
+              "when it differs from the search label. Live-confirmed 2026-08-03 against real NM notices: "
+              "Sandoval went from 0 records (two independent re-runs, before each half of the fix landed) "
+              "to 11 correctly-labeled records in a 58-total-record run, with 0 false rejects introduced "
+              "(the reject decision still runs off the narrow patterns only — a stray notary-block county "
+              "mention can at worst leave a notice unrelabeled, never wrongly rejected). Same caveat as "
+              "Bernalillo: 'active' is documentation-only, not read anywhere as a functional gate — there "
+              "is still NOT yet a real scheduled Apify Task for NM (see Bernalillo's notes).",
     ),
     # ── Oklahoma — NOT scraper-compatible with the current automation ──
     "oklahoma": CountyProfile(
