@@ -55,37 +55,78 @@ NOTICE_PLATFORMS: dict[str, str] = {
 # selected for a run against this value (see _filter_searches_by_platform)
 # rather than silently pointing a run at the wrong site if someone mixes
 # counties from two platforms in one invocation.
-NOTICE_PLATFORM = os.getenv("NOTICE_PLATFORM", "mopublicnotices").strip().lower()
-if NOTICE_PLATFORM not in NOTICE_PLATFORMS:
-    raise ValueError(
-        f"NOTICE_PLATFORM={NOTICE_PLATFORM!r} is not a known platform — "
-        f"must be one of {sorted(NOTICE_PLATFORMS)}"
-    )
-BASE_URL = NOTICE_PLATFORMS[NOTICE_PLATFORM]
-LOGIN_URL = f"{BASE_URL}/authenticate.aspx"
-SMART_SEARCH_URL = f"{BASE_URL}/SmartSearch/Default.aspx"
+#
+# Resolution lives in apply_notice_platform() rather than a bare
+# module-level os.getenv() (added 2026-08-05) so the Apify Actor path can
+# select a platform from Task INPUT at runtime — Apify Console turns out to
+# have no UI for setting custom raw environment variables on a Task or
+# Actor, only Actor Input fields (confirmed while trying to set up NM/KS as
+# separate scheduled Tasks against the shared Actor), so NOTICE_PLATFORM
+# can no longer be a fixed process-env-only value once more than one
+# platform needs to run as its own scheduled Task against the same Actor.
+# The CLI path is unaffected: it still sets a real shell env var before
+# Python starts, which is exactly what apply_notice_platform() reads by
+# default when called with no argument (the module-level call right below
+# the function does exactly that, once, at import time). main.py's
+# actor_main() calls apply_notice_platform(actor_input.get("notice_platform"))
+# early — before any downstream code reads config.NOTICE_PLATFORM/BASE_URL/
+# LOGIN_URL/SMART_SEARCH_URL/NOTICE_SITE_EMAIL/NOTICE_SITE_PASSWORD.
+def apply_notice_platform(platform: str | None = None) -> None:
+    """(Re-)resolve NOTICE_PLATFORM, BASE_URL, LOGIN_URL, SMART_SEARCH_URL,
+    and NOTICE_SITE_EMAIL/PASSWORD.
 
-# ── Credentials ────────────────────────────────────────────────────────
-# NOTICE_SITE_EMAIL/PASSWORD log in to whichever public-notice platform is
-# active (NOTICE_PLATFORM above). Resolution order lets one .env hold
-# credentials for multiple platforms without them overwriting each other —
-# NOTICE_PLATFORM picks which pair a given run actually uses:
-#   1. Platform-specific override, e.g. NEWMEXICOPUBLICNOTICES_EMAIL/
-#      _PASSWORD — the uppercased NOTICE_PLATFORMS key exactly, no
-#      abbreviation, so OK/KS get this for free when they go live.
-#   2. Generic NOTICE_SITE_EMAIL/PASSWORD — single-platform setups that
-#      don't need per-platform separation.
-#   3. Legacy TNPN_EMAIL/PASSWORD — backwards compat with .env files from
-#      before this platform system existed.
-_platform_env_prefix = NOTICE_PLATFORM.upper()
-NOTICE_SITE_EMAIL = os.getenv(
-    f"{_platform_env_prefix}_EMAIL",
-    os.getenv("NOTICE_SITE_EMAIL", os.getenv("TNPN_EMAIL", "")),
-)
-NOTICE_SITE_PASSWORD = os.getenv(
-    f"{_platform_env_prefix}_PASSWORD",
-    os.getenv("NOTICE_SITE_PASSWORD", os.getenv("TNPN_PASSWORD", "")),
-)
+    With no argument (or an empty/whitespace-only string), reads
+    NOTICE_PLATFORM from the process environment exactly as the old
+    module-level code did — this is what happens once, automatically, at
+    import time below, so every existing caller (the CLI, tests, anything
+    relying on python-dotenv/.env) keeps working unchanged. Pass an
+    explicit platform to override it after import — e.g. from Apify Task
+    Input, which has no other way to reach this value.
+    """
+    global NOTICE_PLATFORM, BASE_URL, LOGIN_URL, SMART_SEARCH_URL
+    global NOTICE_SITE_EMAIL, NOTICE_SITE_PASSWORD
+
+    resolved = (platform or os.getenv("NOTICE_PLATFORM", "mopublicnotices")).strip().lower()
+    if resolved not in NOTICE_PLATFORMS:
+        raise ValueError(
+            f"NOTICE_PLATFORM={resolved!r} is not a known platform — "
+            f"must be one of {sorted(NOTICE_PLATFORMS)}"
+        )
+
+    NOTICE_PLATFORM = resolved
+    BASE_URL = NOTICE_PLATFORMS[NOTICE_PLATFORM]
+    LOGIN_URL = f"{BASE_URL}/authenticate.aspx"
+    SMART_SEARCH_URL = f"{BASE_URL}/SmartSearch/Default.aspx"
+
+    # ── Credentials ──────────────────────────────────────────────────
+    # NOTICE_SITE_EMAIL/PASSWORD log in to whichever public-notice platform
+    # is active (NOTICE_PLATFORM above). Resolution order lets one .env
+    # hold credentials for multiple platforms without them overwriting
+    # each other — NOTICE_PLATFORM picks which pair a given run actually
+    # uses:
+    #   1. Platform-specific override, e.g. NEWMEXICOPUBLICNOTICES_EMAIL/
+    #      _PASSWORD — the uppercased NOTICE_PLATFORMS key exactly, no
+    #      abbreviation, so OK/KS get this for free when they go live.
+    #   2. Generic NOTICE_SITE_EMAIL/PASSWORD — single-platform setups
+    #      that don't need per-platform separation.
+    #   3. Legacy TNPN_EMAIL/PASSWORD — backwards compat with .env files
+    #      from before this platform system existed.
+    # An Apify Task's notice_site_username/password Input fields, if set,
+    # still take final precedence over all of the above — actor_main()
+    # applies those as a direct override immediately after calling this
+    # function, same as it always has.
+    _platform_env_prefix = NOTICE_PLATFORM.upper()
+    NOTICE_SITE_EMAIL = os.getenv(
+        f"{_platform_env_prefix}_EMAIL",
+        os.getenv("NOTICE_SITE_EMAIL", os.getenv("TNPN_EMAIL", "")),
+    )
+    NOTICE_SITE_PASSWORD = os.getenv(
+        f"{_platform_env_prefix}_PASSWORD",
+        os.getenv("NOTICE_SITE_PASSWORD", os.getenv("TNPN_PASSWORD", "")),
+    )
+
+
+apply_notice_platform()
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "")  # 2Captcha API key
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")  # Claude Haiku for LLM parsing
 SMARTY_AUTH_ID = os.getenv("SMARTY_AUTH_ID", "")        # Smarty address standardization

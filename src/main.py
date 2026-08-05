@@ -206,6 +206,27 @@ async def actor_main() -> None:
         pipeline_start = _time()
         actor_input = await Actor.get_input() or {}
 
+        # Resolve NOTICE_PLATFORM from Task Input before anything else reads
+        # config.NOTICE_PLATFORM/BASE_URL/LOGIN_URL/SMART_SEARCH_URL/
+        # NOTICE_SITE_EMAIL/PASSWORD. Added 2026-08-05: Apify Console has no
+        # UI for setting a custom raw environment variable on a Task or
+        # Actor (confirmed while setting up NM as its own scheduled Task) —
+        # only Input fields — so this can no longer be a fixed process-env
+        # value once more than one platform runs as its own Task against
+        # this shared Actor. See config.apply_notice_platform()'s docstring.
+        # Falls back to whatever NOTICE_PLATFORM already resolved to at
+        # import time (unset input field = no change) so existing MO Tasks
+        # that don't set this field keep working exactly as before.
+        requested_platform = (actor_input.get("notice_platform") or "").strip().lower()
+        if requested_platform:
+            try:
+                config.apply_notice_platform(requested_platform)
+            except ValueError as e:
+                Actor.log.error(str(e))
+                await Actor.fail(status_message=str(e))
+                return
+            Actor.log.info("NOTICE_PLATFORM set from Task Input: %s", config.NOTICE_PLATFORM)
+
         # Override config credentials from Actor input.
         # Set both config.* AND os.environ so downstream modules that read
         # from either source (e.g., datasift_uploader uses os.environ) pick them up.

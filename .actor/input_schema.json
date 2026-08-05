@@ -12,6 +12,15 @@
             "default": "daily",
             "editor": "select"
         },
+        "notice_platform": {
+            "title": "Notice Platform",
+            "type": "string",
+            "description": "Which public-notice site this Task's saved searches run against. Leave blank to use this Actor's default (mopublicnotices). Added 2026-08-05 so MO/NM/KS can each run as their own scheduled Task against this one Actor — Apify Console has no way to set a raw environment variable per Task, only Input fields like this one. Must match the platform of the counties selected below (see COUNTIES in src/config.py) or the run will fail its saved-search filter with zero matches.",
+            "enum": ["", "mopublicnotices", "newmexicopublicnotices", "kansaspublicnotices", "oklahomanotices", "tnpublicnotice"],
+            "enumTitles": ["(Actor default — mopublicnotices)", "mopublicnotices.com (MO)", "newmexicopublicnotices.com (NM)", "kansaspublicnotices.com (KS)", "oklahomanotices.com (OK — not scraper-compatible yet)", "tnpublicnotice.com (TN — dormant/legacy)"],
+            "default": "",
+            "editor": "select"
+        },
         "counties": {
             "title": "Counties",
             "type": "array",
