@@ -12,9 +12,7 @@ from playwright.async_api import Page, TimeoutError as PwTimeout, async_playwrig
 from captcha_solver import solve_captcha_and_view
 import config
 from config import (
-    BASE_URL,
     COOKIES_FILE,
-    LOGIN_URL,
     MAX_RETRIES,
     REQUEST_DELAY_MAX,
     REQUEST_DELAY_MIN,
@@ -24,7 +22,6 @@ from config import (
     SEEN_IDS_PRUNE_DAYS,
     CAPTCHA_FAILED_IDS_FILE,
     CAPTCHA_FAILED_PRUNE_DAYS,
-    SMART_SEARCH_URL,
     STATE_FILE,
     SavedSearch,
     SEL_LOGIN_EMAIL,
@@ -36,6 +33,18 @@ from config import (
     SEL_SAVED_SEARCHES_DROPDOWN,
     SEL_VIEW_BUTTON_PATTERN,
 )
+# BASE_URL, LOGIN_URL, and SMART_SEARCH_URL are deliberately NOT direct-
+# imported above (found live 2026-08-05, first NM Task test run): a
+# `from config import LOGIN_URL`-style import snapshots the value once at
+# import time, before main.py's actor_main() ever calls
+# config.apply_notice_platform() to switch platforms at runtime — the scrape
+# would silently keep using whatever platform was active when scraper.py
+# was first imported (MO, the default) regardless of what NOTICE_PLATFORM
+# gets set to afterward. config.NOTICE_SITE_EMAIL/PASSWORD never had this
+# bug because they were already accessed as `config.NOTICE_SITE_EMAIL`
+# (live attribute lookup) rather than direct-imported — same fix applied
+# here: use `config.BASE_URL`/`config.LOGIN_URL`/`config.SMART_SEARCH_URL`
+# at every call site instead.
 from data_formatter import _notice_id_from_url
 from foreclosure_filter import is_valid_foreclosure
 from probate_filter import is_valid_probate
@@ -81,8 +90,8 @@ async def login(page: Page, _retries: int = 3) -> bool:
 
     for attempt in range(1, _retries + 1):
         try:
-            logger.info("Logging in to %s (attempt %d/%d)", LOGIN_URL, attempt, _retries)
-            await page.goto(LOGIN_URL)
+            logger.info("Logging in to %s (attempt %d/%d)", config.LOGIN_URL, attempt, _retries)
+            await page.goto(config.LOGIN_URL)
             await page.wait_for_load_state("networkidle")
             break  # page loaded successfully
         except Exception as exc:
@@ -135,7 +144,7 @@ def _get_session_base(page_url: str) -> str:
     m = re.search(r"(https?://[^/]+/\(S\([^)]+\)\)/)", page_url)
     if m:
         return m.group(1)
-    return BASE_URL + "/"
+    return config.BASE_URL + "/"
 
 
 async def _navigate_to_dashboard(page: Page) -> bool:
@@ -752,7 +761,7 @@ async def _try_relogin(page: Page) -> bool:
     if not is_dead:
         # Quick check: try navigating to dashboard
         try:
-            await page.goto(SMART_SEARCH_URL, wait_until="domcontentloaded", timeout=15_000)
+            await page.goto(config.SMART_SEARCH_URL, wait_until="domcontentloaded", timeout=15_000)
             await page.wait_for_load_state("networkidle", timeout=10_000)
         except Exception:
             is_dead = True
@@ -830,7 +839,7 @@ async def _recover_to_search_page(
 async def _is_session_valid(page: Page) -> bool:
     """Check if saved cookies give us a valid logged-in session."""
     try:
-        await page.goto(SMART_SEARCH_URL)
+        await page.goto(config.SMART_SEARCH_URL)
         await page.wait_for_load_state("networkidle")
         # If we land on the dashboard, session is valid
         if "smartsearch" in page.url.lower():
