@@ -396,6 +396,16 @@ async def scrape_all_ks(
                     results_text = await page.inner_text("body")
                     rows = _parse_result_rows(results_text)
                     hrefs = await _get_view_hrefs(page)
+                    # Explicit page-transition log line — added 2026-08-04
+                    # after a live-test gap: this loop had no direct log
+                    # evidence that pagination actually advanced, only
+                    # inferable indirectly (distinct-filename counting
+                    # across the whole run). A stuck-on-page-1 bug would
+                    # have looked identical in the log without this.
+                    logger.info(
+                        "KS: page %d — %d result rows, %d View links",
+                        page_num, len(rows), len(hrefs),
+                    )
 
                     if len(rows) != len(hrefs):
                         logger.warning(
@@ -469,10 +479,13 @@ async def scrape_all_ks(
                         break
 
                     if not await _has_next_page(page):
+                        logger.info("KS: no next-page link found — ending pagination at page %d", page_num)
                         break
                     if not await _click_next_page(page):
+                        logger.warning("KS: next-page link found but click failed — ending pagination at page %d", page_num)
                         break
                     page_num += 1
+                    logger.info("KS: advanced to page %d", page_num)
 
         finally:
             await browser.close()

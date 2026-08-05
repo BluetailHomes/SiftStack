@@ -385,30 +385,47 @@ COUNTIES: dict[str, CountyProfile] = {
         court_records_url="https://www.oscn.net/dockets/Search.aspx",
         notes="Same caveats as Oklahoma County (not scraper-compatible yet).",
     ),
-    # ── Kansas — dedicated scraper built 2026-08-04, not yet live-tested ──
+    # ── Kansas — dedicated scraper built and live-verified 2026-08-04 ──
     "johnson": CountyProfile(
         county="Johnson", state="KS", state_full="Kansas",
-        notice_platform="kansaspublicnotices", scraper_ready=True, active=False,
+        notice_platform="kansaspublicnotices", scraper_ready=True, active=True,
         major_city="Olathe", zip_prefixes=["660", "661", "662"],
         assessor_url="https://www.jocogov.org/department/appraiser/property-data",
         court_records_url="https://www.kscourts.gov/eCourt/District-Court-Records",
-        notes="scraper_ready flipped True 2026-08-04 — src/scraper_ks.py built and dispatched from "
-              "main.py (config.NOTICE_PLATFORM == 'kansaspublicnotices' branches to it instead of "
-              "scraper.py's ASP.NET automation, which doesn't apply here). kansaspublicnotices.com is a "
-              "plain PHP/CodeIgniter form ('NewzGroup'-family vendor, shared TLS cert with "
-              "kypublicnotice.com/ndpublicnotices.com) with NO login and NO CAPTCHA — confirmed live "
-              "during the 2026-08-03 feasibility pass, see docs/OK_KS_SCRAPER_FEASIBILITY.md. Search "
-              "results are notice-level (excerpt + a 'View' link per notice) but the linked PDF is a "
-              "full physical newspaper page that can bundle several unrelated notices — scraper_ks.py's "
-              "_segment_notice_from_anchor() isolates just the one matching notice per result, anchored "
-              "primarily on the notice's own case/estate number (e.g. 'JO-2026-PR-000818') since that's "
-              "guaranteed unique on the page, with a word-window fallback for excerpts that don't carry "
-              "one. Verified via py_compile, the existing test suite, and unit-level checks against two "
-              "real downloaded pages (correctly isolated 2 distinct notices with zero cross-notice bleed, "
-              "including one page that also contained an unrelated city-council notice and a plain news "
-              "article) — but NOT YET run end-to-end against the live site (real search submission, "
-              "pagination, full pipeline through enrichment/CSV). Still active=False until that happens — "
-              "same precedent as Bernalillo before its 2026-08-01 live test. Court records moved from a "
+        notes="Flipped active=True 2026-08-04 after a clean live end-to-end test. src/scraper_ks.py "
+              "built and dispatched from main.py (config.NOTICE_PLATFORM == 'kansaspublicnotices' "
+              "branches to it instead of scraper.py's ASP.NET automation, which doesn't apply here). "
+              "kansaspublicnotices.com is a plain PHP/CodeIgniter form ('NewzGroup'-family vendor, "
+              "shared TLS cert with kypublicnotice.com/ndpublicnotices.com) with NO login and NO "
+              "CAPTCHA — confirmed live during the 2026-08-03 feasibility pass, see "
+              "docs/OK_KS_SCRAPER_FEASIBILITY.md. Search results are notice-level (excerpt + a 'View' "
+              "link per notice) but the linked PDF is a full physical newspaper page that can bundle "
+              "several unrelated notices — scraper_ks.py's _segment_notice_from_anchor() isolates just "
+              "the one matching notice per result, anchored primarily on the notice's own case/estate "
+              "number (e.g. 'JO-2026-PR-000818') since that's guaranteed unique on the page, with a "
+              "word-window fallback for excerpts that don't carry one. "
+              "**Live-tested 2026-08-04, both a daily-mode run and a historical (12-month) run "
+              "specifically to force pagination:** found and fixed a real config bug along the way — "
+              "NOTICE_PLATFORMS['kansaspublicnotices'] had a spurious 'www.' that the site's real TLS "
+              "cert doesn't cover (cert SAN list covers the bare domain plus NewzGroup sibling domains, "
+              "not 'www.'), causing an immediate SSL hostname-mismatch preflight failure — fixed by "
+              "dropping the 'www.'. After that fix: search/county-selection/parsing all worked cleanly, "
+              "zero 'could not locate notice anchor' warnings across every notice scraped (case-number "
+              "anchoring always fired — the word-window fallback never had to run), zero row/href-count "
+              "mismatches across any page. Spot-checked 4 records against the real source PDFs, "
+              "including both a 9-notice and a 10-notice bundled page — case numbers and decedent names "
+              "matched exactly on all 4, zero cross-notice bleed even on the heavily-bundled pages. "
+              "Pagination confirmed working via indirect but solid evidence (scraper_ks.py didn't log "
+              "explicit page-transition lines at the time — fixed same day, see below): the historical "
+              "run processed 98 distinct real PDF filenames, well over one page's ~50-result capacity, "
+              "and reached a since_date cutoff a year back — neither is reachable without successfully "
+              "clicking into further pages. One cosmetic mismatch found on record JO-2026-PR-000771: "
+              "extracted PR name 'Julie L. Madl' vs. the source document's 'Julie H. Madl' (middle "
+              "initial only, decedent name and case number both correct) — traced to the source "
+              "document itself, not a scraper bug (see task tracker). Historical run also showed a "
+              "notably higher validation-drop rate than MO/NM (29 of 59 candidates dropped, ~49%, vs. "
+              "MO/NM's typical ~15-20%) — flagged as a Johnson County notice-format characteristic "
+              "worth a closer look eventually, not yet investigated. Court records moved from a "
               "county-only terminal system to the statewide Kansas eCourt portal in Nov 2024.",
     ),
     # ── Tennessee — dormant/legacy, kept functional but inactive ───────
