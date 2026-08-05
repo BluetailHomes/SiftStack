@@ -1,21 +1,31 @@
 name: Stage 2 - DataSift Upload
 
 # Second stage of the daily pipeline. The Apify Actor (tn-public-notice-scraper)
-# runs at 2:00 AM America/Phoenix (09:00 UTC) and deliberately stops short of
-# uploading to DataSift — headless Playwright inside Apify's Actor container
-# was found unreliable for the upload wizard (see src/stage2_datasift_upload.py
-# docstring for the full explanation). This workflow runs in a plain GitHub
-# Actions Ubuntu runner instead — a different environment than Apify's Actor
-# container — and finishes the job: pull the already-enriched, DataSift-
-# formatted CSVs out of the Apify Key-Value Store and upload them for real.
+# runs on its own schedule per platform — MO at 2:00 AM, NM at 2:20 AM, KS at
+# 2:40 AM America/Phoenix, each as its own Apify Task — and deliberately stops
+# short of uploading to DataSift — headless Playwright inside Apify's Actor
+# container was found unreliable for the upload wizard (see
+# src/stage2_datasift_upload.py docstring for the full explanation). This
+# workflow runs in a plain GitHub Actions Ubuntu runner instead — a different
+# environment than Apify's Actor container — and finishes the job: pull the
+# already-enriched, DataSift-formatted CSVs out of each configured platform's
+# Apify Key-Value Store and upload them for real.
 #
-# Timing: 10:10 UTC = 3:10 AM America/Phoenix (fixed UTC-7, no DST) — about
-# 70 minutes after the Apify run starts (it typically finishes in ~8 min) and
-# 50 minutes before Rahaf's 4:00 AM start.
+# Multi-platform (2026-08-05): stage2_datasift_upload.py now loops over every
+# platform listed in the APIFY_TASKS secret ("MO:taskId,NM:taskId,KS:taskId"),
+# looking up each one's run history by TASK ID rather than by the shared
+# Actor ID — see that script's docstring for why this matters. Only platforms
+# actually present in APIFY_TASKS get auto-uploaded; leaving NM/KS out of that
+# secret keeps them on manual Slack-links upload until their scheduled Tasks
+# have proven out clean unattended runs (see CLAUDE.md).
+#
+# Timing: 10:30 UTC = 3:30 AM America/Phoenix (fixed UTC-7, no DST) — 50-90
+# minutes after the platform Apify runs start (each typically finishes in
+# well under 15 min) and 30 minutes before Rahaf's 4:00 AM start.
 
 on:
   schedule:
-    - cron: '10 10 * * *'
+    - cron: '30 10 * * *'
   workflow_dispatch: {}  # allows manually triggering a run from the Actions tab
 
 jobs:
@@ -39,6 +49,7 @@ jobs:
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           APIFY_ACTOR_ID: ${{ secrets.APIFY_ACTOR_ID }}
+          APIFY_TASKS: ${{ secrets.APIFY_TASKS }}
           DATASIFT_EMAIL: ${{ secrets.DATASIFT_EMAIL }}
           DATASIFT_PASSWORD: ${{ secrets.DATASIFT_PASSWORD }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
