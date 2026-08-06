@@ -437,26 +437,57 @@ def run_enrichment_pipeline(
         return notices
 
     # ── Step 3c: Probate Property Lookup ────────────────────────────
-    # For probate records without a property address, search Knox Tax API
-    # by the decedent's name to find their property.
-    probate_no_addr = [
+    # For probate records without a property address, search a county
+    # property/tax data source by the decedent's name to find their
+    # property. Knox (TN) uses its own Tax API. Bernalillo/Sandoval (NM)
+    # use the NM Office of the State Engineer's statewide parcels service
+    # instead (added 2026-08-06 — see nm_parcel_lookup.py and CLAUDE.md's
+    # "NM Property-Address Lookup Tier" for the full writeup). No other
+    # county has an equivalent source yet — see CLAUDE.md's "0/24 property
+    # addresses" note for why this gap exists in the first place.
+    probate_no_addr_knox = [
         n for n in notices
         if n.notice_type == "probate"
         and not n.address.strip()
         and n.decedent_name.strip()
         and n.county.lower() == "knox"
     ]
-    if probate_no_addr:
-        logger.info("── Step 3c: Probate Property Lookup (%d candidates) ──", len(probate_no_addr))
+    if probate_no_addr_knox:
+        logger.info(
+            "── Step 3c: Probate Property Lookup — Knox (%d candidates) ──",
+            len(probate_no_addr_knox),
+        )
         try:
             from tax_enricher import _probate_property_lookup
-            _probate_property_lookup(probate_no_addr)
-            found = sum(1 for n in probate_no_addr if n.address.strip())
-            logger.info("  Property address found: %d/%d", found, len(probate_no_addr))
+            _probate_property_lookup(probate_no_addr_knox)
+            found = sum(1 for n in probate_no_addr_knox if n.address.strip())
+            logger.info("  Property address found: %d/%d", found, len(probate_no_addr_knox))
         except ImportError:
             logger.warning("  _probate_property_lookup not available — skipping")
         except Exception as e:
             logger.warning("  Probate property lookup failed: %s", e)
+
+    probate_no_addr_nm = [
+        n for n in notices
+        if n.notice_type == "probate"
+        and not n.address.strip()
+        and n.decedent_name.strip()
+        and n.county.lower() in ("bernalillo", "sandoval")
+    ]
+    if probate_no_addr_nm:
+        logger.info(
+            "── Step 3c: Probate Property Lookup — NM (%d candidates) ──",
+            len(probate_no_addr_nm),
+        )
+        try:
+            from nm_parcel_lookup import probate_property_lookup_nm
+            probate_property_lookup_nm(probate_no_addr_nm)
+            found = sum(1 for n in probate_no_addr_nm if n.address.strip())
+            logger.info("  Property address found: %d/%d", found, len(probate_no_addr_nm))
+        except ImportError:
+            logger.warning("  nm_parcel_lookup not available — skipping")
+        except Exception as e:
+            logger.warning("  NM probate property lookup failed: %s", e)
 
     # ── Step 4: Parcel Address Lookup ────────────────────────────────
     if not opts.skip_parcel_lookup and not opts.skip_tax:
