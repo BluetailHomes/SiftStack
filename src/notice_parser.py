@@ -552,11 +552,19 @@ OWNER_PATTERNS = [
 # MO's connector phrase before the real name. Falls through to the
 # original direct "title: NAME" capture for TN-style notices, where
 # neither of those additions consume anything.
+# Character class includes '\-' and "'" to match DECEDENT_NAME_RE below —
+# found missing 2026-08-06 while adding a regression test for a genuinely
+# hyphenated PR surname ("Smith-Jones"): the old [A-Za-z\s.]+? class has no
+# terminator match right after the hyphen (not comma/paren/space-of/
+# space-for/space-digit/end), so the whole regex silently failed to match
+# and owner_name was left empty for any PR name containing a hyphen or
+# apostrophe (e.g. "O'Brien-Smith") — pre-existing, unrelated to the
+# _clean_name line-wrap fix above, just found alongside it.
 PROBATE_NAME_RE = re.compile(
     r"(?:Personal\s+Representative(?:\(S\))?|Executor|Executrix|Administrator|Administratrix)"
     r"(?!\s+of\s+the\s+estate\b)"
     r"(?:'s)?\s*(?:business\s+)?(?:address\s+is\s*)?"
-    r"[:\s]+([A-Z][A-Za-z\s.]+?)(?:\s*,|\s*\(|\s+of\b|\s+for\b|\s+\d|\s*$)",
+    r"[:\s]+([A-Z][A-Za-z\s.,'\-]+?)(?:\s*,|\s*\(|\s+of\b|\s+for\b|\s+\d|\s*$)",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -1440,9 +1448,37 @@ def _parse_pr_address(notice: NoticeData) -> None:
         )
 
 
+# PDF line-wrap hyphen artifact, name-extraction flavor (found live
+# 2026-08-06 via the NM property-lookup tier's live test: decedent names
+# "DIANA LYNN IRWIN" / "ROBERTA ANDERSON" arrived at _parse_name() as
+# "Diana Lynn Ir- Win" / "Roberta An- Derson"). Same underlying cause as
+# the "Nalillo"/"Bernalillo" county-name bug _dehyphenate() fixes
+# (2026-08-01) and the Kansas excerpt/PDF whitespace mismatch documented
+# in CLAUDE.md (2026-08-04) — a word got wrapped across a PDF line break
+# as "IR-\nWIN", and pypdfium2's text extraction already collapsed that
+# newline to a plain space by the time raw_text reaches here, leaving
+# "IR- WIN" (hyphen-space, no newline) — the exact shape _dehyphenate()'s
+# `-\s*\n\s*` regex can't match, since the newline itself is already gone.
+# DECEDENT_NAME_RE's captured character class allows hyphens inline, so
+# the garbled value gets captured as a plausible-looking (non-empty) name
+# and the LLM fallback — which parses the same raw text correctly, see
+# llm_parser's `decedent='DIANA LYNN IRWIN'` on the same real notice —
+# never gets a chance to run, since the fallback only fires when the
+# regex path leaves a field empty, not when it's merely wrong.
+#
+# A genuine hyphenated name (e.g. "Smith-Jones") has no whitespace around
+# the hyphen in source text, so "hyphen immediately followed by
+# whitespace" is a narrow, safe signal for the line-wrap case specifically
+# — this won't touch real compound surnames.
+_NAME_LINE_WRAP_HYPHEN_RE = re.compile(r"-\s+")
+
+
 def _clean_name(raw: str) -> str:
     """Normalize a name: trim, title-case, remove trailing conjunctions."""
     name = re.sub(r"\s+", " ", raw).strip()
+    # Merge PDF line-wrap hyphen artifacts before title-casing splits the
+    # fragments into separate "words" — see _NAME_LINE_WRAP_HYPHEN_RE above.
+    name = _NAME_LINE_WRAP_HYPHEN_RE.sub("", name)
     # Remove trailing "And" / "and" (word-level — don't strip from "Bolland" etc.)
     name = re.sub(r"\s+,?\s*(?:AND|and)\s*$", "", name)
     # Remove trailing commas, periods

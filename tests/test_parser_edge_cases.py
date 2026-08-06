@@ -510,6 +510,34 @@ def main():
         "123 Main Street, Knoxville, TN 37901.",
         "", notice_type="probate")
 
+    # PDF line-wrap hyphen artifacts in decedent names (found live 2026-08-06
+    # via the NM property-lookup tier's live test — see _clean_name's
+    # _NAME_LINE_WRAP_HYPHEN_RE comment for the full root-cause writeup).
+    # "IR-\nWIN" got wrapped mid-word across a PDF line break, and by the
+    # time raw_text reaches _parse_name() the newline is already collapsed
+    # to a plain space ("IR- WIN") — _dehyphenate()'s newline-anchored
+    # regex can't catch this shape.
+    probate_test("probate-hyphen-wrap-irwin",
+        "Estate of DIANA LYNN IR- WIN, Deceased. "
+        "Personal Representative: JESSICA K. DORADO, "
+        "5720 Osuna Dr. NE, Albuquerque, NM 87109",
+        "Diana Lynn Irwin", "Jessica K. Dorado")
+
+    probate_test("probate-hyphen-wrap-anderson",
+        "Estate of ROBERTA AN- DERSON, Deceased. "
+        "Personal Representative: JOHN ANDERSON, "
+        "100 Main St, Albuquerque, NM 87109",
+        "Roberta Anderson", "John Anderson")
+
+    # Genuine hyphenated surname (no whitespace around the hyphen in source
+    # text) must survive unchanged — the fix targets "hyphen immediately
+    # followed by whitespace" specifically, not hyphens in general.
+    probate_test("probate-genuine-hyphenated-surname",
+        "Estate of MARY SMITH-JONES, Deceased. "
+        "Personal Representative: TOM SMITH-JONES, "
+        "200 Elm St, Albuquerque, NM 87109",
+        "Mary Smith-Jones", "Tom Smith-Jones")
+
     # ── PR mailing address extraction tests ──
     print("\n-- PR mailing address tests --")
 
