@@ -328,15 +328,36 @@ async def actor_main() -> None:
             m = re.search(r"[?&]ID=(\d+)", url)
             return m.group(1) if m else ""
 
+        # IDs already pushed to the Actor's default dataset THIS run — kept
+        # deliberately separate from `seen_ids` (added 2026-08-05, found via
+        # the NM live-test investigation). `seen_ids` starts as a set() here
+        # but gets REASSIGNED to a dict a few lines down (loaded from the
+        # Apify KVS cross-run cache) — and _scrape_results_page() records
+        # every notice's ID into that same dict the moment it's parsed,
+        # *before* the batch ever reaches this callback. So checking `nid in
+        # seen_ids` here always found the ID already present (it was just
+        # written a moment earlier by the very same processing step) and
+        # `continue`d past every single notice — `unique` was always empty,
+        # Actor.push_data() was never actually called, and the Console's
+        # Output/Results tab has shown 0 for every run since this Task went
+        # live (confirmed against MO's full run history, builds 1.0.2-1.0.5,
+        # not just this NM run) despite the real deliverable — the DataSift
+        # CSVs written to KVS — being fully populated the whole time. Using
+        # a separate local set here, scoped only to "already pushed to the
+        # dataset this run," fixes both the wrong-dedup logic and the
+        # dict-has-no-.add() crash that would otherwise immediately follow
+        # once the dedup logic itself stopped short-circuiting first.
+        pushed_ids: set[str] = set()
+
         async def push_batch(batch_notices):
             """Push new unique notices to dataset immediately after each search."""
             unique = []
             for n in batch_notices:
                 nid = _notice_id(n.source_url)
-                if nid and nid in seen_ids:
+                if nid and nid in pushed_ids:
                     continue
                 if nid:
-                    seen_ids.add(nid)
+                    pushed_ids.add(nid)
                 unique.append(n)
             if unique:
                 await Actor.push_data([
