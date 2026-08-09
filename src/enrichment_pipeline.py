@@ -723,6 +723,33 @@ def run_enrichment_pipeline(
         except Exception as e:
             logger.warning("  NM probate property lookup failed: %s", e)
 
+    # Missouri (Clay County only as of this build — added 2026-08-09; see
+    # mo_parcel_lookup.py's module docstring for why Jackson/Platte/Cass
+    # aren't wired up yet). MO's gap was confirmed worse than NM's
+    # pre-tier state (0/6 property addresses on a real scheduled run) —
+    # see CLAUDE.md's High-Potential Lead Filter section.
+    probate_no_addr_mo = [
+        n for n in notices
+        if n.notice_type == "probate"
+        and not n.address.strip()
+        and n.decedent_name.strip()
+        and n.county.lower() == "clay"
+    ]
+    if probate_no_addr_mo:
+        logger.info(
+            "── Step 3c: Probate Property Lookup — MO (%d candidates) ──",
+            len(probate_no_addr_mo),
+        )
+        try:
+            from mo_parcel_lookup import probate_property_lookup_mo
+            probate_property_lookup_mo(probate_no_addr_mo)
+            found = sum(1 for n in probate_no_addr_mo if n.address.strip())
+            logger.info("  Property address found: %d/%d", found, len(probate_no_addr_mo))
+        except ImportError:
+            logger.warning("  mo_parcel_lookup not available — skipping")
+        except Exception as e:
+            logger.warning("  MO probate property lookup failed: %s", e)
+
     # ── Step 4: Parcel Address Lookup ────────────────────────────────
     if not opts.skip_parcel_lookup and not opts.skip_tax:
         candidates = [
