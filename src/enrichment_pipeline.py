@@ -350,13 +350,24 @@ def _filter_high_potential(
     skip_zip_filter/skip_equity_filter only control whether the matching
     DROP decision runs, not whether the tag is computed.
 
-    ZIP filter: a record is dropped only when its property ZIP is KNOWN
-    and NOT in target_zips. A record with no property ZIP yet passes
-    through unfiltered — most commonly probate leads in a market without a
-    property-address lookup tier (MO, as of this build; NM and Knox both
-    have one — see nm_parcel_lookup.py / tax_enricher.py). This mirrors
-    Kaycie's explicit instruction: find the property address before
-    dropping on ZIP, don't guess or substitute the PR's mailing ZIP.
+    ZIP filter: a record is dropped only when it has a CONFIRMED property
+    street address (notice.address non-blank — via a parcel-lookup tier or
+    a genuine in-text address match) whose ZIP is NOT in target_zips. A
+    record with no confirmed property address passes through unfiltered
+    even if notice.zip happens to be set — most commonly probate leads in
+    a market without a property-address lookup tier (MO's Jackson/Platte/
+    Cass, as of this build; MO's Clay, NM, and Knox all have one — see
+    mo_parcel_lookup.py / nm_parcel_lookup.py / tax_enricher.py). Requiring
+    a real address, not just a non-blank zip, is what actually delivers
+    Kaycie's explicit instruction (find the property address before
+    dropping on ZIP, don't guess or substitute the PR's mailing ZIP) —
+    checking notice.zip alone isn't sufficient, since notice_parser's
+    "Strategy 5" last-resort fallback (_extract_city_zip_fallback) can
+    populate notice.zip from any plausible-looking ZIP found anywhere in
+    the notice text (often the PR's own mailing ZIP) while deliberately
+    leaving notice.address blank. Found and fixed 2026-08-09 via a live MO
+    run where 22/42 records were dropped as "outside target ZIPs" despite
+    only 3 records having a Smarty-confirmed property address that run.
 
     Equity filter: a record is dropped only when _classify_equity_signal()
     returns "low_equity_drop" — i.e. a real, computed equity_percent below
@@ -376,14 +387,33 @@ def _filter_high_potential(
     for n in notices:
         n.equity_signal = _classify_equity_signal(n)
 
+        # A ZIP is only trustworthy as "the property's ZIP" when a real
+        # property street address was also resolved (via a parcel-lookup
+        # tier or a genuine in-text address match). notice_parser's
+        # "Strategy 5" last-resort fallback (_extract_city_zip_fallback)
+        # can populate notice.zip from ANY plausible-looking ZIP found
+        # anywhere in the notice text — most often the PR/executor's own
+        # mailing ZIP embedded in the notice's boilerplate — while
+        # deliberately leaving notice.address blank (see its own
+        # docstring: "leave address empty"). Gating on address.strip()
+        # too, not just zip.strip(), is what actually delivers Kaycie's
+        # "find the property address before dropping on ZIP" rule —
+        # checking zip alone let an unconfirmed, likely-PR ZIP silently
+        # drive real drop decisions. Found 2026-08-09 via a live MO run
+        # where 22/42 records were dropped as "outside target ZIPs" despite
+        # only 3 records having a Smarty-confirmed property address that
+        # same run — the other 19 were fallback ZIPs, not property ZIPs.
         zip_clean = n.zip.strip()
-        if zip_clean:
+        has_property_address = bool(n.address.strip())
+        if zip_clean and has_property_address:
             n.zip_tier = target_zips.get(zip_clean, "")
             if not skip_zip_filter and zip_clean not in target_zips:
                 zip_dropped += 1
                 suppressed.append((n, "zip_out_of_target"))
                 continue
-        # else: property ZIP not yet known — pass through, don't guess
+        # else: no confirmed property address (so no trustworthy ZIP) —
+        # pass through, don't guess. n.zip_tier stays "" here even if
+        # n.zip happens to be set, since that ZIP isn't property-confirmed.
 
         if not skip_equity_filter and n.equity_signal == "low_equity_drop":
             equity_dropped += 1
@@ -402,11 +432,11 @@ def _filter_high_potential(
     _write_suppressed_log(suppressed)
 
     kept = len(result)
-    unresolved_zip = sum(1 for n in result if not n.zip.strip())
+    unresolved_zip = sum(1 for n in result if not n.address.strip())
     if unresolved_zip:
         logger.info(
-            "  %d/%d surviving records have no property ZIP yet — passed "
-            "through unfiltered rather than dropped (see docstring)",
+            "  %d/%d surviving records have no confirmed property address yet"
+            " — passed through unfiltered rather than dropped (see docstring)",
             unresolved_zip, kept,
         )
     low_equity_flagged = sum(1 for n in result if n.equity_signal == "low_equity_flag")

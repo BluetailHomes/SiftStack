@@ -135,8 +135,11 @@ def test_classify_equity_percent_takes_priority_over_ownership_proxy():
 # ── _filter_high_potential ───────────────────────────────────────────────
 
 
-def _make_notice(zip_code="", equity_percent="", notice_type="probate"):
-    return NoticeData(zip=zip_code, equity_percent=equity_percent, notice_type=notice_type)
+def _make_notice(zip_code="", equity_percent="", notice_type="probate", address="123 Main St"):
+    # address defaults to a resolved street so zip-gate tests exercise the
+    # "confirmed property address" path by default. Pass address="" to
+    # test the "no confirmed address" pass-through path explicitly.
+    return NoticeData(zip=zip_code, address=address, equity_percent=equity_percent, notice_type=notice_type)
 
 
 def test_filter_drops_off_target_zip(tmp_path, monkeypatch):
@@ -152,12 +155,42 @@ def test_filter_drops_off_target_zip(tmp_path, monkeypatch):
 
 def test_filter_passes_through_unknown_zip_unfiltered(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path)
-    n_unknown_zip = _make_notice(zip_code="")  # property zip not yet resolved
+    n_unknown_zip = _make_notice(zip_code="", address="")  # nothing resolved at all
     result = _filter_high_potential(
         [n_unknown_zip], target_zips=config.TARGET_ZIPS, hard_drop_equity_percent=20.0
     )
     assert result == [n_unknown_zip]
     assert n_unknown_zip.zip_tier == ""
+
+
+def test_filter_zip_without_confirmed_address_passes_through_unfiltered(tmp_path, monkeypatch):
+    # Regression test for the 2026-08-09 fix: notice_parser's last-resort
+    # fallback (_extract_city_zip_fallback) can set notice.zip from any
+    # plausible ZIP found anywhere in the notice text — often the PR's
+    # own mailing ZIP — while deliberately leaving notice.address blank.
+    # A live MO run showed 22/42 records dropped as "outside target
+    # ZIPs" despite only 3 having a Smarty-confirmed property address
+    # that same run. The gate must require BOTH a non-blank zip AND a
+    # non-blank address before treating a lead as ZIP-resolved.
+    n = _make_notice(zip_code="99999", address="")  # zip set, but no confirmed address
+    result = _filter_high_potential(
+        [n], target_zips=config.TARGET_ZIPS, hard_drop_equity_percent=20.0
+    )
+    assert result == [n]
+    assert n.zip_tier == ""  # not tiered either -- the zip isn't trustworthy
+
+
+def test_filter_zip_with_confirmed_address_still_gates_normally(tmp_path, monkeypatch):
+    # Sanity check the fix doesn't break the real, intended case: a zip
+    # AND a real property address together should still gate normally.
+    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path)
+    n_in = _make_notice(zip_code="64130", address="123 Main St")
+    n_out = _make_notice(zip_code="99999", address="456 Elm St")
+    result = _filter_high_potential(
+        [n_in, n_out], target_zips=config.TARGET_ZIPS, hard_drop_equity_percent=20.0
+    )
+    assert result == [n_in]
+    assert n_in.zip_tier == "Tier 1"
 
 
 def test_filter_drops_confirmed_low_equity(tmp_path, monkeypatch):
