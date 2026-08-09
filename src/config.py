@@ -574,6 +574,112 @@ ESTATE_OF_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ── High-Potential Lead Filter (target ZIPs + equity threshold) ────────
+# Added 2026-08-09 per Kaycie's request: only pull leads in high-investor-
+# activity ZIPs with sufficient equity, rather than marketing every notice
+# in every active county wall-to-wall.
+#
+# TARGET_ZIPS is Tier 1 + Tier 2 ZIPs (38 of 56) from Kaycie's
+# "ZIP-Level Targeting - Active Markets.xlsx" (Market Intelligence's live
+# REI Sift Market Finder pull, 2026-08-05, MO+KS+NM sheet), per that
+# workbook's own stated guidance: "Tier 1 and Tier 2 ZIPs are where
+# marketing dollars... should concentrate first." Tier 3 (18 ZIPs — lower
+# investor-activity volume, slower exits per that methodology) is
+# excluded. Oklahoma ZIPs from the same workbook are NOT included here —
+# Oklahoma has no working scraper yet (see COUNTIES["oklahoma"]/["tulsa"]),
+# so there's nothing to filter there today.
+#
+# One data nuance from the source workbook, resolved here rather than
+# left ambiguous: ZIP 64155 straddles the Clay/Platte County, MO line and
+# appears in the workbook twice with different tiers — Tier 2 under Clay,
+# Tier 3 under Platte. The workbook's own methodology notes flag Clay's
+# figure as "the more complete one" for this ZIP, so the Tier 2 (include)
+# classification is the one used below; it does not appear twice here
+# since a ZIP is either in this set or not, regardless of county.
+# Maps ZIP -> "Tier 1" / "Tier 2" (rather than a flat set) so downstream
+# tagging can distinguish the two — a Tier 1 ZIP is a stronger signal than
+# Tier 2, per the source workbook's own tier definitions (Tier 1: 10+
+# monthly investor transactions, 3-6 months supply, DOM below the FRED
+# national baseline; Tier 2: 5-10 monthly investor transactions, wider
+# supply/DOM bands).
+TARGET_ZIPS: dict[str, str] = {
+    # Jackson County, MO
+    "64130": "Tier 1", "64132": "Tier 1", "64134": "Tier 1",
+    "64138": "Tier 1", "64128": "Tier 1", "64133": "Tier 2",
+    # Clay County, MO (includes 64155 — see note above)
+    "64118": "Tier 1", "64119": "Tier 1", "64068": "Tier 2",
+    "64155": "Tier 2", "64157": "Tier 2", "64024": "Tier 2",
+    "64117": "Tier 2", "64060": "Tier 2",
+    # Platte County, MO
+    "64152": "Tier 1", "64151": "Tier 2", "64079": "Tier 2",
+    # Cass County, MO
+    "64012": "Tier 1", "64083": "Tier 2", "64080": "Tier 2",
+    # Johnson County, KS
+    "66061": "Tier 1", "66062": "Tier 1", "66208": "Tier 1",
+    "66083": "Tier 2", "66030": "Tier 2", "66085": "Tier 2",
+    "66221": "Tier 2", "66212": "Tier 2",
+    # Bernalillo County, NM
+    "87120": "Tier 1", "87111": "Tier 1", "87109": "Tier 2",
+    "87110": "Tier 2", "87106": "Tier 2", "87114": "Tier 2",
+    "87107": "Tier 2", "87121": "Tier 2",
+    # Sandoval County, NM
+    "87124": "Tier 1", "87144": "Tier 1",
+}
+
+# Equity gate — revised 2026-08-09 after a second review pass (Kaycie ran
+# the v1 30%-hard-cutoff design past a separate advisory chat). That
+# review's core objection: a single hard cutoff risks throwing away a
+# great probate deal on a stale/estimated debt figure, since
+# property_enricher's equity_percent is itself an estimate (80% LTV +
+# amortization-table assumption, not a real payoff balance — see
+# property_enricher._estimate_remaining_balance). Two thresholds instead
+# of one, so borderline leads get flagged for human judgment rather than
+# silently deleted:
+#
+#   equity_percent <  HARD_DROP_EQUITY_PERCENT (20%)      -> suppressed
+#   HARD_DROP_EQUITY_PERCENT <= pct < LOW_EQUITY_FLAG_PERCENT (20-30%)
+#                                                           -> kept, tagged "low_equity"
+#   equity_percent >= LOW_EQUITY_FLAG_PERCENT (30%+)       -> kept, normal
+#   equity_percent unknown/uncomputable                    -> kept, tagged "equity_unknown"
+#     (never auto-suppressed on missing data — see
+#     enrichment_pipeline._classify_equity_signal())
+#
+# Why 20%, not 30%, as the actual drop line: on a $200K property, 20%
+# equity is only ~$40K of gross spread before closing costs, liens,
+# repairs, assignment fee, and the buyer's own margin — most wholesale
+# assignments don't pencil out below that. 30% is comfortably workable
+# (~$60K gross) but not itself "safe to auto-kill below" given how rough
+# the debt estimate is, especially for probate where a decades-old
+# mortgage record is often wrong or long since paid off. The 20-30% band
+# is therefore "probably marginal, let a human glance at it" rather than
+# an automatic pass or an automatic drop.
+#
+# Per the same review, suppressed leads are never hard-deleted — see
+# enrichment_pipeline._write_suppressed_log(), which appends every
+# dropped record (zip-out-of-target or equity-below-20%) to a QA CSV in
+# output/ with its reason, so the cutoff can be revisited later using
+# real suppressed-lead samples instead of guessing blind.
+HARD_DROP_EQUITY_PERCENT = 20.0
+LOW_EQUITY_FLAG_PERCENT = 30.0
+
+# Deprecated alias — kept only so any external reference doesn't hard-
+# crash; new code should use LOW_EQUITY_FLAG_PERCENT / HARD_DROP_EQUITY_PERCENT.
+DEFAULT_MIN_EQUITY_PERCENT = LOW_EQUITY_FLAG_PERCENT
+
+# Years since a property's last recorded sale (Zillow price history) above
+# which we treat it as "likely high equity" even when Zillow couldn't
+# compute a real equity_percent (no zestimate, or the sale predates 1990 —
+# see property_enricher._estimate_remaining_balance). This is a proxy, not
+# a real number: most of a standard 30-year mortgage's principal paydown
+# happens after year 10-15, and most markets appreciate meaningfully over
+# a 10+ year span, so long, unbroken ownership is a reasonable, explainable
+# signal even without a computed percentage. A property with NO sale on
+# Zillow's record at all (common for probate — decades of ownership,
+# purchased before Zillow's data coverage) is treated the same way as
+# "very long ownership," not as "unknown" — see
+# enrichment_pipeline._classify_equity_signal().
+HIGH_EQUITY_OWNERSHIP_YEARS = 10
+
 _config_logger = logging.getLogger(__name__)
 
 

@@ -143,6 +143,37 @@ Filterable via `--counties` and `--types` CLI args (comma-separated, or omit for
 - **Rate limiting:** 2-3 second random delays between requests, 3 retries per page.
 - **Address dedup:** Same property can appear in multiple notices; `data_formatter.deduplicate()` keeps the most recent.
 
+## High-Potential Lead Filter (target ZIPs + equity gate)
+
+**Added 2026-08-09, per Kaycie's request:** only pull leads in high-investor-activity ZIPs with sufficient equity, rather than marketing every notice in every active county wall-to-wall. Runs as **Step 8b** in `enrichment_pipeline.py`, right after Zillow (Step 8, which populates `equity_percent`) and before Obituary (Step 9, the most expensive step — LLM calls + web search), so leads that don't meet the bar never reach it. Applies to all three live-scraper markets: Missouri (Jackson/Clay/Platte/Cass), Kansas (Johnson), New Mexico (Bernalillo/Sandoval). Oklahoma is excluded — no working scraper yet.
+
+**Two independent gates, both permissive by design — a lead is dropped only when a rule is genuinely confident, never on missing data:**
+
+1. **ZIP gate.** `config.TARGET_ZIPS` — a `{zip: "Tier 1"|"Tier 2"}` dict of 38 ZIPs (of 56 total) sourced from Kaycie's `ZIP-Level Targeting - Active Markets.xlsx` (Market Intelligence's REI Sift Market Finder pull, 2026-08-05). Tier 1 = 10+ monthly investor transactions, 3-6 months supply, DOM below the FRED national baseline; Tier 2 = 5-10 monthly investor transactions, wider bands; Tier 3 (18 ZIPs, excluded) = below those thresholds. A record is dropped only when its property ZIP is **known** and **not** in `TARGET_ZIPS` — a record with no property ZIP yet (common for probate in a market without a property-address lookup tier — MO has none as of this build; NM and Knox both do, see `nm_parcel_lookup.py` / `tax_enricher.py`) **passes through unfiltered**. This is deliberate: Kaycie's explicit instruction was to find the property address before dropping on ZIP, never guess or substitute the PR's mailing ZIP.
+   - One data nuance resolved in `config.py`: ZIP 64155 straddles Clay/Platte County, MO and appears in the source workbook twice with conflicting tiers (Tier 2 under Clay, Tier 3 under Platte) — resolved using Clay's Tier 2 figure per the workbook's own methodology notes, which flag Clay's as the more complete one.
+
+2. **Equity gate.** Two thresholds, not one — revised same-day after Kaycie ran the original single-30%-cutoff design past a separate advisory chat, which raised a real risk: `property_enricher`'s `equity_percent` is an **estimate** (80% LTV + amortization-table assumption, not a real mortgage payoff balance — see `property_enricher._estimate_remaining_balance`), so one hard cutoff risks killing a genuinely great probate deal on a stale/wrong debt figure.
+   - `equity_percent < config.HARD_DROP_EQUITY_PERCENT` (**20%**) → **suppressed**. On a $200K property, 20% equity is only ~$40K of gross spread before closing costs, liens, repairs, assignment fee, and buyer margin — most wholesale assignments don't pencil out below that.
+   - `20% ≤ equity_percent < config.LOW_EQUITY_FLAG_PERCENT` (**30%**) → **kept**, tagged `low_equity`, flagged for human review rather than auto-processed or auto-killed.
+   - `equity_percent ≥ 30%` → kept, processed normally.
+   - **Equity data missing/uncomputable → always kept, tagged `equity_unknown`, never suppressed.** This is the one non-negotiable rule from Kaycie across both design passes.
+   - **Ownership-length proxy:** when `equity_percent` isn't available, `_years_since_sale(n.mls_last_sold_date) >= config.HIGH_EQUITY_OWNERSHIP_YEARS` (10 years) is treated as a positive signal (`likely_high_ownership`, never suppressed) — most of a standard 30-year mortgage's principal paydown happens after year 10-15, and most markets appreciate meaningfully over a 10+ year span. A **probate** lead with **no sale on Zillow's record at all** gets this same treatment (long, unbroken ownership — likely purchased before Zillow's data coverage begins) rather than being treated as "unknown"; non-probate types with no sale on record are `unknown`, since that's more likely a plain Zillow data gap than a real long-ownership signal.
+
+**Suppressed leads are never hard-deleted.** Every dropped record — ZIP or equity — is appended (via `enrichment_pipeline._write_suppressed_log()`) to `output/suppressed_leads.csv`: `date_logged, run_id, address, city, state, zip, zip_tier, county, notice_type, estimated_value, estimated_equity, equity_percent, mls_last_sold_date, reason_suppressed`. Per the advisory-chat review: periodically sample this file and ask "would we actually have wanted any of these?" — if almost nothing interesting shows up in the 20-30% band, tighten `LOW_EQUITY_FLAG_PERCENT`; if real deals are found under 20%, loosen `HARD_DROP_EQUITY_PERCENT`. Both are single tunable constants in `config.py`, not hardcoded in the filter logic.
+
+**DataSift tags** (`datasift_formatter._build_tags()`): `zip_tier_1` / `zip_tier_2`, and one of `high_equity` (confirmed ≥30%) / `low_equity` (20-30%, flagged) / `high_equity_ownership_proxy` (long-ownership proxy) / `equity_unknown`.
+
+**Opt-out flags** — both filters can be independently disabled without touching `config.py` (tags are still computed either way, only the drop decision is skipped):
+```bash
+python src/main.py daily --include-off-target   # keep leads outside TARGET_ZIPS
+python src/main.py daily --include-low-equity    # keep leads with confirmed equity < 20%
+```
+Actor Input equivalents: `include_off_target`, `include_low_equity` (both booleans, default OFF). Wired through all 5 `PipelineOptions` call sites in `main.py` (Actor path, PDF import, photo import, CSV re-import, CLI scrape) as `skip_zip_filter` / `skip_equity_filter`.
+
+**Known gap, not yet investigated:** whether MO needs its own property-address lookup tier (like NM's `nm_parcel_lookup.py` or Knox's tier in `tax_enricher.py`). Without one, MO probate leads without a resolved property ZIP just pass through the ZIP gate unfiltered rather than being properly evaluated against `TARGET_ZIPS` — not incorrect per the "don't guess" rule, but it does mean MO's ZIP targeting is currently weaker than NM's/Knox's until this is scoped.
+
+Tests: `tests/test_high_potential_filter.py` (31 tests — `_years_since_sale`, `_classify_equity_signal` across all 5 signal branches, `_filter_high_potential` including the suppressed-leads QA log, and the `config.py` constants).
+
 ## Output
 
 CSV files land in `output/` (gitignored). Logs go to `logs/` with timestamped filenames. Sift columns: `date_added, address, city, state, zip, owner_name, notice_type, county, source_url`.

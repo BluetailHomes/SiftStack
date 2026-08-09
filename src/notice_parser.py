@@ -135,6 +135,10 @@ class NoticeData:
     # Pipeline metadata (set by enrichment_pipeline)
     run_id: str = ""                   # Unique pipeline run identifier for data lineage
 
+    # High-Potential Lead Filter (set by enrichment_pipeline._filter_high_potential)
+    zip_tier: str = ""                 # "Tier 1" / "Tier 2" from config.TARGET_ZIPS' source workbook, "" if unknown/not in target set
+    equity_signal: str = ""            # "confirmed_high", "confirmed_low", "likely_high_ownership", or "unknown"
+
 
 # ── Known cities for city-fallback matching ────────────────────────────
 # Sorted longest-first so "Lenoir City" matches before "City". Originally

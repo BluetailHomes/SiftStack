@@ -269,6 +269,8 @@ async def actor_main() -> None:
         include_vacant = actor_input.get("include_vacant", False)
         include_commercial = actor_input.get("include_commercial", False)
         include_entities = actor_input.get("include_entities", False)
+        include_off_target = actor_input.get("include_off_target", False)
+        include_low_equity = actor_input.get("include_low_equity", False)
 
         # ── Preflight health checks (shared with the CLI path) ──────────
         # Confirmed live 2026-07-23: this block used to be a hand-rolled
@@ -500,6 +502,8 @@ async def actor_main() -> None:
                 skip_vacant_filter=include_vacant,
                 skip_commercial_filter=include_commercial,
                 skip_entity_filter=include_entities,
+                skip_zip_filter=include_off_target,
+                skip_equity_filter=include_low_equity,
                 source_label="Apify Actor",
             )
             notices = run_enrichment_pipeline(notices, opts)
@@ -790,6 +794,8 @@ def _run_pdf_import(args) -> None:
         skip_vacant_filter=getattr(args, "include_vacant", False),
         skip_commercial_filter=getattr(args, "include_commercial", False),
         skip_entity_filter=getattr(args, "include_entities", False),
+        skip_zip_filter=getattr(args, "include_off_target", False),
+        skip_equity_filter=getattr(args, "include_low_equity", False),
         skip_heir_verification=args.skip_heir_verification,
         max_heir_depth=args.max_heir_depth,
         skip_dm_address=args.skip_dm_address,
@@ -858,6 +864,8 @@ def _run_photo_import(args) -> None:
         skip_vacant_filter=getattr(args, "include_vacant", False) or notice_type in no_address_types,
         skip_commercial_filter=getattr(args, "include_commercial", False),
         skip_entity_filter=getattr(args, "include_entities", False),
+        skip_zip_filter=getattr(args, "include_off_target", False),
+        skip_equity_filter=getattr(args, "include_low_equity", False),
         skip_parcel_lookup=args.skip_tax,
         skip_smarty=args.skip_smarty,
         skip_zillow=args.skip_zillow,
@@ -959,6 +967,8 @@ def _run_csv_import(args) -> None:
         skip_vacant_filter=getattr(args, "include_vacant", False),
         skip_commercial_filter=getattr(args, "include_commercial", False),
         skip_entity_filter=getattr(args, "include_entities", False),
+        skip_zip_filter=getattr(args, "include_off_target", False),
+        skip_equity_filter=getattr(args, "include_low_equity", False),
         skip_smarty=args.skip_smarty,
         skip_zillow=args.skip_zillow,
         skip_tax=args.skip_tax,
@@ -1397,6 +1407,16 @@ def cli_main() -> None:
         "--include-entities",
         action="store_true",
         help="Keep entity-owned records (LLC, Corp, etc.) without filtering. Default: removed unless --research-entities finds a person.",
+    )
+    parser.add_argument(
+        "--include-off-target",
+        action="store_true",
+        help="Keep leads outside the target-ZIP list (default: dropped, logged to output/suppressed_leads.csv). See config.TARGET_ZIPS.",
+    )
+    parser.add_argument(
+        "--include-low-equity",
+        action="store_true",
+        help="Keep leads with confirmed equity below the hard-drop threshold (default 20%%, dropped and logged to output/suppressed_leads.csv). See config.HARD_DROP_EQUITY_PERCENT.",
     )
     parser.add_argument(
         "--upload-datasift",
@@ -1921,6 +1941,8 @@ def _run_scrape_pipeline(args, searches) -> None:
         skip_vacant_filter=getattr(args, "include_vacant", False),
         skip_commercial_filter=getattr(args, "include_commercial", False),
         skip_entity_filter=getattr(args, "include_entities", False),
+        skip_zip_filter=getattr(args, "include_off_target", False),
+        skip_equity_filter=getattr(args, "include_low_equity", False),
         skip_smarty=getattr(args, "skip_smarty", False),
         skip_zillow=getattr(args, "skip_zillow", False),
         skip_tax=getattr(args, "skip_tax", False),

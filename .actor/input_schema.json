@@ -240,6 +240,20 @@
             "description": "Keep LLC/Corp/Trust-owned records without filtering. Default OFF — entities are removed unless a person is found behind them.",
             "default": false,
             "editor": "checkbox"
+        },
+        "include_off_target": {
+            "title": "Include Off-Target ZIPs",
+            "type": "boolean",
+            "description": "Keep leads outside the target-ZIP marketing list (Tier 1/2 investor-activity ZIPs — see config.TARGET_ZIPS). Default OFF — off-target leads are dropped and logged to output/suppressed_leads.csv for QA, not deleted.",
+            "default": false,
+            "editor": "checkbox"
+        },
+        "include_low_equity": {
+            "title": "Include Low-Equity Leads",
+            "type": "boolean",
+            "description": "Keep leads with confirmed equity below the hard-drop threshold (default 20% — see config.HARD_DROP_EQUITY_PERCENT). Default OFF — low-equity leads are dropped and logged to output/suppressed_leads.csv for QA. Leads with unknown/uncomputed equity are never dropped regardless of this setting.",
+            "default": false,
+            "editor": "checkbox"
         }
     }
 }

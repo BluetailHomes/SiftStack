@@ -11,6 +11,7 @@ run_enrichment_pipeline(). The pipeline handles dedup, filtering,
 and all enrichment steps in a fixed canonical order.
 """
 
+import csv
 import logging
 import re
 import uuid
@@ -43,6 +44,16 @@ class PipelineOptions:
     skip_zillow: bool = False
     skip_obituary: bool = False
     skip_ancestry: bool = False
+    skip_high_potential_filter: bool = False  # true if EITHER sub-filter below is skipped — kept for back-compat / simple "skip entirely" callers
+    skip_zip_filter: bool = False    # opt-out via --include-off-target
+    skip_equity_filter: bool = False  # opt-out via --include-low-equity
+
+    # High-Potential Lead Filter sub-options — None means "use config
+    # defaults" (config.TARGET_ZIPS / config.HARD_DROP_EQUITY_PERCENT).
+    # Overridable per-run (e.g. a future --target-zips/--min-equity-percent
+    # CLI flag) without touching config.py.
+    target_zips: dict[str, str] | None = None
+    hard_drop_equity_percent: float | None = None
 
     # Obituary sub-options
     skip_heir_verification: bool = False
@@ -182,6 +193,229 @@ def _filter_commercial(notices: list[NoticeData]) -> list[NoticeData]:
     removed = before - len(result)
     if removed:
         logger.info("  Removed %d commercial properties", removed)
+    return result
+
+
+# ── High-Potential Lead Filter (target ZIPs + equity) ──────────────────
+# Added 2026-08-09 per Kaycie's request: only pull leads in high-
+# investor-activity ZIPs with sufficient equity. See config.TARGET_ZIPS,
+# config.HARD_DROP_EQUITY_PERCENT / config.LOW_EQUITY_FLAG_PERCENT, and
+# config.HIGH_EQUITY_OWNERSHIP_YEARS for the underlying data/thresholds
+# and their sourcing/reasoning.
+#
+# Revised 2026-08-09 (same day, second pass) after Kaycie ran the v1
+# design (single 30% hard cutoff) past a separate advisory chat, which
+# raised a real risk: property_enricher's equity_percent is an ESTIMATE
+# (80% LTV + amortization-table assumption, not a real mortgage payoff
+# balance), so a single hard cutoff can kill a genuinely great probate
+# deal on a stale/wrong debt figure. Revised design, three load-bearing
+# decisions from that review, all reflected below:
+#
+#  1. Two equity thresholds, not one — HARD_DROP_EQUITY_PERCENT (20%)
+#     below which a lead is suppressed, and LOW_EQUITY_FLAG_PERCENT (30%)
+#     below which (but >= 20%) a lead is KEPT but tagged "low_equity" for
+#     a human to sanity-check rather than auto-processed or auto-killed.
+#  2. Never drop a lead for MISSING equity data — only a CONFIRMED
+#     equity_percent below 20% causes a drop. "unknown"/no-data records
+#     are kept and tagged "equity_unknown", never suppressed.
+#  3. Suppressed leads (zip-out-of-target OR equity-below-20%) are never
+#     hard-deleted — every one is appended to a QA CSV via
+#     _write_suppressed_log() so the 20%/30% cutoffs can be revisited
+#     later against real suppressed-lead samples instead of guessed once
+#     and left alone.
+#
+# One decision carried over unchanged from v1: don't drop a probate lead
+# on ZIP before we've actually tried to find its property address. Not
+# every market has a property-address lookup tier yet (NM and Knox do;
+# MO does not, as of this build) — see _filter_high_potential() below.
+
+
+def _years_since_sale(mls_last_sold_date: str) -> int | None:
+    """Years elapsed since a property's last recorded sale, or None if unknown."""
+    if not mls_last_sold_date:
+        return None
+    try:
+        sold = datetime.strptime(mls_last_sold_date, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return (datetime.now() - sold).days // 365
+
+
+def _classify_equity_signal(n: NoticeData) -> str:
+    """Classify a record's equity signal for filtering and tagging.
+
+    Returns one of:
+    - "confirmed_high": real equity_percent >= config.LOW_EQUITY_FLAG_PERCENT (30%)
+      — process normally.
+    - "low_equity_flag": real equity_percent in
+      [config.HARD_DROP_EQUITY_PERCENT, config.LOW_EQUITY_FLAG_PERCENT) —
+      i.e. 20-30% — kept, but tagged "low_equity" so a human glances at it
+      rather than the deal auto-proceeding or auto-dying on a rough debt
+      estimate.
+    - "low_equity_drop": real equity_percent < config.HARD_DROP_EQUITY_PERCENT
+      (20%) — suppressed by _filter_high_potential(), logged to the QA CSV,
+      never silently deleted.
+    - "likely_high_ownership": no computed equity_percent, but either (a) the
+      property's last recorded sale is old enough (see
+      config.HIGH_EQUITY_OWNERSHIP_YEARS) or (b) Zillow has NO sale on record
+      at all — for probate specifically, "never sold on Zillow's record" is
+      itself a strong long-ownership signal (a decedent who owned the home
+      for decades, likely purchased before Zillow's data coverage begins),
+      not an absence of signal. Treated as a positive equity proxy, never
+      suppressed.
+    - "unknown": no equity_percent AND no basis to infer long ownership —
+      kept and tagged "equity_unknown", never suppressed. (e.g. a recent,
+      known sale with equity_percent still uncomputed for some other
+      reason — missing zestimate, pre-1990 purchase-year cutoff in
+      property_enricher._estimate_remaining_balance, etc.)
+    """
+    if n.equity_percent:
+        try:
+            pct = float(n.equity_percent)
+        except ValueError:
+            pct = None
+        if pct is not None:
+            if pct < config.HARD_DROP_EQUITY_PERCENT:
+                return "low_equity_drop"
+            if pct < config.LOW_EQUITY_FLAG_PERCENT:
+                return "low_equity_flag"
+            return "confirmed_high"
+
+    years = _years_since_sale(n.mls_last_sold_date)
+    if years is None:
+        # No sale on Zillow's record at all. For probate leads this is a
+        # meaningful signal (long, unbroken ownership), not just missing
+        # data — but for non-probate notice types it's more likely a plain
+        # Zillow data gap, so only treat it as a positive signal for
+        # probate specifically.
+        if n.notice_type == "probate":
+            return "likely_high_ownership"
+        return "unknown"
+    if years >= config.HIGH_EQUITY_OWNERSHIP_YEARS:
+        return "likely_high_ownership"
+    return "unknown"
+
+
+def _write_suppressed_log(suppressed: list[tuple[NoticeData, str]]) -> None:
+    """Append suppressed leads to a QA CSV — never hard-delete a drop.
+
+    Per the 2026-08-09 review: suppressed leads should be sampled
+    periodically ("would we actually have wanted any of these?") to
+    validate/tune the 20%/30% equity cutoffs and the target-ZIP list
+    against real deal outcomes, rather than guessed once and left alone.
+    One row per suppressed record, appended (not overwritten) so the log
+    accumulates across runs. Best-effort — a logging failure here must
+    never break the actual pipeline run.
+    """
+    if not suppressed:
+        return
+    try:
+        config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = config.OUTPUT_DIR / "suppressed_leads.csv"
+        is_new = not log_path.exists()
+        with open(log_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if is_new:
+                writer.writerow([
+                    "date_logged", "run_id", "address", "city", "state", "zip",
+                    "zip_tier", "county", "notice_type", "estimated_value",
+                    "estimated_equity", "equity_percent", "mls_last_sold_date",
+                    "reason_suppressed",
+                ])
+            for n, reason in suppressed:
+                writer.writerow([
+                    datetime.now().strftime("%Y-%m-%d"), n.run_id, n.address,
+                    n.city, n.state, n.zip, n.zip_tier, n.county,
+                    n.notice_type, n.estimated_value, n.estimated_equity,
+                    n.equity_percent, n.mls_last_sold_date, reason,
+                ])
+        logger.info("  Logged %d suppressed lead(s) to %s (QA, not deleted)",
+                     len(suppressed), log_path)
+    except OSError as e:
+        logger.warning("  Could not write suppressed-leads QA log: %s", e)
+
+
+def _filter_high_potential(
+    notices: list[NoticeData],
+    target_zips: dict[str, str],
+    hard_drop_equity_percent: float,
+    skip_zip_filter: bool = False,
+    skip_equity_filter: bool = False,
+) -> list[NoticeData]:
+    """Drop leads outside target ZIPs or with confirmed equity < 20%.
+
+    Sets notice.zip_tier and notice.equity_signal on every surviving
+    record (used for DataSift tagging — see datasift_formatter._build_tags)
+    regardless of whether either filter is active for that record —
+    skip_zip_filter/skip_equity_filter only control whether the matching
+    DROP decision runs, not whether the tag is computed.
+
+    ZIP filter: a record is dropped only when its property ZIP is KNOWN
+    and NOT in target_zips. A record with no property ZIP yet passes
+    through unfiltered — most commonly probate leads in a market without a
+    property-address lookup tier (MO, as of this build; NM and Knox both
+    have one — see nm_parcel_lookup.py / tax_enricher.py). This mirrors
+    Kaycie's explicit instruction: find the property address before
+    dropping on ZIP, don't guess or substitute the PR's mailing ZIP.
+
+    Equity filter: a record is dropped only when _classify_equity_signal()
+    returns "low_equity_drop" — i.e. a real, computed equity_percent below
+    HARD_DROP_EQUITY_PERCENT (20%). "low_equity_flag" (20-30%), "unknown",
+    and "likely_high_ownership" all pass through unfiltered — the 20-30%
+    band is tagged for human review, not auto-dropped, per the 2026-08-09
+    review (see module comment above).
+
+    Every dropped record — ZIP or equity — is logged to a QA CSV via
+    _write_suppressed_log() rather than silently discarded.
+    """
+    zip_dropped = 0
+    equity_dropped = 0
+    result = []
+    suppressed: list[tuple[NoticeData, str]] = []
+
+    for n in notices:
+        n.equity_signal = _classify_equity_signal(n)
+
+        zip_clean = n.zip.strip()
+        if zip_clean:
+            n.zip_tier = target_zips.get(zip_clean, "")
+            if not skip_zip_filter and zip_clean not in target_zips:
+                zip_dropped += 1
+                suppressed.append((n, "zip_out_of_target"))
+                continue
+        # else: property ZIP not yet known — pass through, don't guess
+
+        if not skip_equity_filter and n.equity_signal == "low_equity_drop":
+            equity_dropped += 1
+            suppressed.append((n, f"equity_below_{hard_drop_equity_percent:.0f}pct"))
+            continue
+
+        result.append(n)
+
+    if zip_dropped:
+        logger.info("  Removed %d records outside target ZIPs", zip_dropped)
+    if equity_dropped:
+        logger.info(
+            "  Removed %d records with confirmed equity below %.0f%%",
+            equity_dropped, hard_drop_equity_percent,
+        )
+    _write_suppressed_log(suppressed)
+
+    kept = len(result)
+    unresolved_zip = sum(1 for n in result if not n.zip.strip())
+    if unresolved_zip:
+        logger.info(
+            "  %d/%d surviving records have no property ZIP yet — passed "
+            "through unfiltered rather than dropped (see docstring)",
+            unresolved_zip, kept,
+        )
+    low_equity_flagged = sum(1 for n in result if n.equity_signal == "low_equity_flag")
+    if low_equity_flagged:
+        logger.info(
+            "  %d/%d surviving records flagged \"low_equity\" (20-30%%) — "
+            "kept, recommend human review before spending on them",
+            low_equity_flagged, kept,
+        )
     return result
 
 
@@ -647,6 +881,39 @@ def run_enrichment_pipeline(
     elif opts.skip_zillow:
         logger.info("── Step 8: Zillow (skipped) ──")
 
+    # ── Step 8b: High-Potential Filter (target ZIPs + equity) ───────
+    # Runs right after Zillow (Step 8), the step that populates
+    # equity_percent, and before Step 9 (Obituary) — the most expensive
+    # step (LLM calls + web search) — so leads that don't meet the bar
+    # never reach it. See _filter_high_potential()'s docstring for the
+    # two hard rules (never drop on missing equity data; never drop a
+    # probate lead on ZIP before we've tried to find its property
+    # address).
+    both_skipped = opts.skip_high_potential_filter or (opts.skip_zip_filter and opts.skip_equity_filter)
+    if not both_skipped:
+        logger.info("── Step 8b: High-Potential Filter (target ZIPs + equity) ──")
+        if opts.skip_zip_filter:
+            logger.info("  ZIP filter disabled (--include-off-target) — tagging only, no drops")
+        if opts.skip_equity_filter:
+            logger.info("  Equity filter disabled (--include-low-equity) — tagging only, no drops")
+        notices = _filter_high_potential(
+            notices,
+            target_zips=opts.target_zips if opts.target_zips is not None else config.TARGET_ZIPS,
+            hard_drop_equity_percent=(
+                opts.hard_drop_equity_percent
+                if opts.hard_drop_equity_percent is not None
+                else config.HARD_DROP_EQUITY_PERCENT
+            ),
+            skip_zip_filter=opts.skip_zip_filter,
+            skip_equity_filter=opts.skip_equity_filter,
+        )
+        logger.info("  %d records after filter", len(notices))
+        if not notices:
+            logger.warning("No records remaining after filtering")
+            return notices
+    else:
+        logger.info("── Step 8b: High-Potential Filter (skipped) ──")
+
     # ── Step 9: Obituary Enrichment ──────────────────────────────────
     if not opts.skip_obituary and not opts.has_obituary:
         if config.ANTHROPIC_API_KEY:
@@ -829,3 +1096,25 @@ def _log_summary(notices: list[NoticeData], opts: PipelineOptions) -> None:
             probate_with_addr,
             probate_total,
         )
+
+    # High-Potential Filter — equity signal breakdown on survivors
+    _hp_both_skipped = opts.skip_high_potential_filter or (opts.skip_zip_filter and opts.skip_equity_filter)
+    if not _hp_both_skipped:
+        signal_counts: dict[str, int] = {}
+        for n in notices:
+            if n.equity_signal:
+                signal_counts[n.equity_signal] = signal_counts.get(n.equity_signal, 0) + 1
+        if signal_counts:
+            # Note: "low_equity_drop" deliberately absent — those records
+            # were suppressed in Step 8b and never reach this summary.
+            breakdown = ", ".join(
+                f"{label}: {signal_counts.get(key, 0)}"
+                for key, label in (
+                    ("confirmed_high", "confirmed high (30%+)"),
+                    ("low_equity_flag", "flagged low equity (20-30%)"),
+                    ("likely_high_ownership", "likely high (ownership)"),
+                    ("unknown", "unknown"),
+                )
+                if signal_counts.get(key, 0)
+            )
+            logger.info("  Equity signal (survivors): %s", breakdown)

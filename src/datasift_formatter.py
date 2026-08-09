@@ -332,6 +332,23 @@ def _build_tags(notice: NoticeData) -> str:
     if notice.source_url and notice.source_url.startswith("photo:"):
         tags.append("photo_import")
 
+    # High-Potential Lead Filter tags (set by
+    # enrichment_pipeline._filter_high_potential — see that module for the
+    # zip_tier / equity_signal values and their meaning)
+    if notice.zip_tier == "Tier 1":
+        tags.append("zip_tier_1")
+    elif notice.zip_tier == "Tier 2":
+        tags.append("zip_tier_2")
+
+    if notice.equity_signal == "low_equity_flag":
+        tags.append("low_equity")
+    elif notice.equity_signal == "unknown":
+        tags.append("equity_unknown")
+    elif notice.equity_signal == "likely_high_ownership":
+        tags.append("high_equity_ownership_proxy")
+    elif notice.equity_signal == "confirmed_high":
+        tags.append("high_equity")
+
     return ",".join(tags)
 
 
