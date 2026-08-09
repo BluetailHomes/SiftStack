@@ -137,7 +137,7 @@ class NoticeData:
 
     # High-Potential Lead Filter (set by enrichment_pipeline._filter_high_potential)
     zip_tier: str = ""                 # "Tier 1" / "Tier 2" from config.TARGET_ZIPS' source workbook, "" if unknown/not in target set
-    equity_signal: str = ""            # "confirmed_high", "confirmed_low", "likely_high_ownership", or "unknown"
+    equity_signal: str = ""            # "confirmed_high" (>=30%), "low_equity_flag" (20-30%), "low_equity_drop" (<20%, suppressed before reaching output), "likely_high_ownership", or "unknown"
 
 
 # ── Known cities for city-fallback matching ────────────────────────────
