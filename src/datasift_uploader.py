@@ -27,6 +27,45 @@ logger = logging.getLogger(__name__)
 DATASIFT_UPLOAD_URL = "https://app.reisift.io/records/properties"
 
 
+async def _close_wizard_modal_if_open(page: Page) -> None:
+    """Close the CSV-upload wizard modal if one is still open.
+
+    Root cause of 5 of the last 8 nightly stage2-datasift-upload.yml
+    GitHub Actions failures (confirmed live 2026-09-04, e.g. run #43):
+    when a CSV upload ends ambiguously — "Upload may have succeeded but
+    confirmation timed out" (the "Finish Upload" button was never
+    successfully clicked, see below) — the wizard's own modal stays open
+    in the DOM. upload_datasift_split() then immediately starts the next
+    CSV's upload flow without ever closing it, so the still-open modal's
+    overlay (Modalstyles__ModalOverlay, containing
+    Modalstyles__ModalRobustLayoutVerticalTimelineContainer — the
+    wizard's own step sidebar, NOT a new/different popup as the raw
+    Playwright error first suggested) intercepts the very next
+    "Upload File" sidebar click. That click then silently retries for the
+    full 30s timeout before failing with a generic "subtree intercepts
+    pointer events" error that doesn't obviously point back to a stuck
+    modal. Confirmed live the modal has a real, visible close (X) button
+    (Modalstyles__ModalCloseButton) — try that first, Escape as a
+    fallback. No-op if no modal is open.
+    """
+    try:
+        close_btn = page.locator('[class*="ModalCloseButton"]')
+        if await close_btn.count() > 0 and await close_btn.first.is_visible():
+            await close_btn.first.click(force=True)
+            await page.wait_for_timeout(1000)
+            logger.debug("Closed leftover wizard modal via close button")
+            return
+        # Fallback: Escape closes most modal implementations even without
+        # a locatable close button.
+        overlay = page.locator('[class*="ModalOverlay"]')
+        if await overlay.count() > 0 and await overlay.first.is_visible():
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(500)
+            logger.debug("Closed leftover wizard modal via Escape")
+    except Exception as e:
+        logger.debug("Wizard modal close check failed: %s", e)
+
+
 async def _click_next_step(page: Page, timeout: int = 20000) -> bool:
     """Click the 'Next Step' button that appears in the upload wizard.
 
@@ -97,6 +136,14 @@ async def upload_csv(
         await page.goto(DATASIFT_UPLOAD_URL, wait_until="domcontentloaded")
     # Wait for SPA to fully render (longer for headless/cloud environments)
     await page.wait_for_timeout(8000)
+
+    # Close a leftover wizard modal from a PRIOR upload_csv() call on this
+    # same page first (see _close_wizard_modal_if_open's docstring — the
+    # real root cause behind 5 of 8 recent nightly stage2 failures). Must
+    # run before _dismiss_popups() below: that helper's JS overlay-removal
+    # pass only targets elements whose text mentions "notifications", which
+    # this modal's own text never does, so it wouldn't have caught this.
+    await _close_wizard_modal_if_open(page)
 
     # Dismiss notifications popup + Beamer NPS survey iframe if present.
     # Confirmed live 2026-07-22: on a second upload within the same
