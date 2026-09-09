@@ -123,7 +123,29 @@ LABEL_MAP = {
 # it's almost certainly a stale/previous day's run (e.g. tonight's scrape
 # failed), not tonight's data. Re-uploading a stale run would silently
 # duplicate leads in DataSift under a wrong-dated list name.
-MAX_RUN_AGE_HOURS = 6
+#
+# Widened from 6 to 20 (2026-09-08) after root-causing 3 separate "no
+# fresh run" failures (runs #35, #39, #42, #46) via the GitHub Actions
+# API: this workflow is scheduled for 10:30 UTC daily but GitHub Actions
+# itself started the job 4h12m, 5h30m, 7h11m, and 10h43m late on those
+# four occasions respectively — a well-documented GitHub Actions
+# limitation (scheduled workflows are deprioritized under platform load,
+# sometimes by many hours) — not the upstream Apify Task actually being
+# stale. The 6h check was correctly comparing a fresh Apify run against a
+# "now" that GitHub had itself delayed past the window. 20h comfortably
+# covers the worst delay observed so far with real margin, while staying
+# well under 24h so a genuinely previous-day Apify run still can't pass
+# as fresh for today's upload.
+#
+# Caveat this doesn't fix: there's still no idempotency check against
+# DataSift itself (see CLAUDE.md) — if GitHub Actions ever fires this
+# workflow twice for the same still-"fresh" Apify run (e.g. a delayed run
+# from last night plus a close-to-on-time run tonight both landing inside
+# the same 20h window), both would re-upload and create duplicate DataSift
+# lists. Observed run spacing has consistently been ~24h apart regardless
+# of individual delay, so this hasn't happened in practice, but a real fix
+# needs actual dedup against DataSift, not just a wider/narrower window.
+MAX_RUN_AGE_HOURS = 20
 
 
 def _notify(message: str, *, ok: bool = True) -> None:
