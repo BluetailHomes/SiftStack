@@ -25,6 +25,7 @@ from datasift_core import (
 logger = logging.getLogger(__name__)
 
 DATASIFT_UPLOAD_URL = "https://app.reisift.io/records/properties"
+DATASIFT_LISTS_URL = "https://app.reisift.io/lists"
 
 
 async def _close_wizard_modal_if_open(page: Page) -> None:
@@ -1077,6 +1078,56 @@ async def skip_trace_records(page: Page, list_name: str) -> dict:
         await _screenshot(page, "skip_error")
 
     return result
+
+
+async def list_exists(page: Page, list_name: str) -> bool:
+    """Check whether a DataSift list with this exact name already exists.
+
+    Added 2026-09-08 as the real fix for the idempotency gap documented in
+    CLAUDE.md's stage2 section: widening MAX_RUN_AGE_HOURS made a
+    double-upload of the same Apify run (two GitHub Actions triggers
+    landing in the same freshness window) more likely in principle, even
+    though it hasn't happened in practice yet. Callers should treat a
+    True result as "skip this upload", not attempt any DOM interaction
+    themselves — this only reads state.
+
+    Navigates the real Lists page rather than trying to infer existence
+    from the upload wizard's own list-name field (which accepts any text
+    and doesn't warn on a collision) — same live-verified pattern used by
+    this session's diag_verify_239c.py: Lists → "default" folder → search
+    box → check the exact name appears in the results.
+
+    Fails OPEN (returns False, i.e. "doesn't exist, OK to upload") on any
+    error — login failure, DOM change, network hiccup — since a broken
+    existence check blocking every future upload is a worse outcome than
+    the rare double-upload this function exists to catch. Callers that
+    need to know the check itself failed should wrap their own
+    login/navigation and treat exceptions distinctly; this function
+    absorbs its own errors by design.
+    """
+    try:
+        await page.goto(DATASIFT_LISTS_URL, wait_until="domcontentloaded")
+        await page.wait_for_timeout(4000)
+        await _dismiss_popups(page)
+
+        default_folder = page.locator('text="default"')
+        if await default_folder.count() > 0:
+            await default_folder.first.click()
+            await page.wait_for_timeout(2000)
+            await _dismiss_popups(page)
+
+        search_box = page.locator('input[placeholder*="Search" i]')
+        if await search_box.count() > 0:
+            await search_box.first.fill(list_name)
+            await page.wait_for_timeout(2000)
+
+        body_text = await page.locator("body").inner_text()
+        found = list_name in body_text
+        logger.debug("list_exists(%r) = %s", list_name, found)
+        return found
+    except Exception as e:
+        logger.warning("list_exists(%r) check failed — assuming False (fail open): %s", list_name, e)
+        return False
 
 
 async def upload_to_datasift(

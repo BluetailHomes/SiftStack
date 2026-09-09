@@ -320,6 +320,48 @@ def _process_target(token: str, target: dict, email: str, password: str) -> bool
         _notify(msg, ok=False)
         return False
 
+    # Idempotency check (added 2026-09-08): if the first CSV's list already
+    # exists in DataSift, this exact run has almost certainly already been
+    # uploaded — e.g. a delayed GitHub Actions trigger re-processing the
+    # same still-"fresh" Apify run inside the now-widened 20h window (see
+    # MAX_RUN_AGE_HOURS above). One list existing is a reliable enough
+    # signal for the whole batch since all of a run's list names share the
+    # same date/platform prefix and get created together in one
+    # upload_datasift_split() call. Uses its own short-lived session
+    # (separate from the real upload below) so a check failure can never
+    # block the real upload — list_exists() itself also fails open, so
+    # this is a defense-in-depth belt-and-suspenders check, not a single
+    # point of failure.
+    try:
+        from playwright.async_api import async_playwright as _async_playwright
+        from datasift_core import login as _datasift_login
+        from datasift_uploader import list_exists as _list_exists
+
+        async def _check_already_uploaded() -> bool:
+            async with _async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await (await browser.new_context()).new_page()
+                try:
+                    if not await _datasift_login(page, email, password):
+                        return False
+                    return await _list_exists(page, csv_infos[0]["list_name"])
+                finally:
+                    await browser.close()
+
+        if asyncio.run(_check_already_uploaded()):
+            msg = (
+                f"ℹ️ {tag}Stage 2 DataSift upload: list "
+                f"'{csv_infos[0]['list_name']}' already exists in DataSift — "
+                f"run `{run.get('id')}` was almost certainly already uploaded "
+                f"(likely a repeat trigger within the freshness window). "
+                f"Skipping to avoid a duplicate."
+            )
+            log.info(msg)
+            _notify(msg, ok=True)
+            return True
+    except Exception as e:
+        log.warning("%sIdempotency pre-check failed (%s) — proceeding with upload anyway", tag, e)
+
     try:
         from datasift_uploader import upload_datasift_split, upload_to_datasift
 
