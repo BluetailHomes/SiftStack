@@ -128,6 +128,51 @@ def notify_preflight_failure(
     return _send_webhook("\n".join(lines), webhook_url)
 
 
+def evaluate_volume_anomaly(
+    total_now: int,
+    raw_now: int,
+    history: list[dict],
+) -> str | None:
+    """Decide whether a run's output volume looks anomalous vs. recent history.
+
+    A run that finishes without raising an exception but produces zero or
+    anomalously few records looks identical to a normal quiet day to anything
+    watching for crashes/errors — this is the "success but empty" gap: an
+    unattended run should never be able to silently produce nothing without
+    it being visible.
+
+    Args:
+        total_now: Final exported record count for this run.
+        raw_now: Raw notices scraped this run, before enrichment/validation.
+        history: Prior runs' totals, most-recent-last, each a dict with at
+            least a "total" int key (e.g. [{"date": "...", "total": 5}, ...]).
+            Only the trailing 7 entries are considered.
+
+    Returns:
+        A human-readable warning if the run looks anomalous, else None.
+    """
+    recent = [h["total"] for h in history[-7:] if isinstance(h.get("total"), int)]
+    avg = sum(recent) / len(recent) if recent else None
+
+    if raw_now > 0 and total_now == 0:
+        return (
+            f"Found {raw_now} raw notice(s) this run but 0 survived enrichment/"
+            f"validation — every candidate was dropped (e.g. missing address). "
+            f"Confirm this county's data pipeline can actually produce records."
+        )
+    if avg is not None and avg >= 2 and total_now < avg * 0.3:
+        detail = (
+            "possible source outage or silent scraper failure"
+            if raw_now == 0
+            else "well below normal"
+        )
+        return (
+            f"Volume anomaly: {total_now} notice(s) this run vs a 7-run average "
+            f"of {avg:.1f} (raw scraped: {raw_now}) — {detail}."
+        )
+    return None
+
+
 def _count_by_field(notices: list[NoticeData], field: str) -> dict[str, int]:
     """Count notices grouped by a field value."""
     counts: dict[str, int] = {}

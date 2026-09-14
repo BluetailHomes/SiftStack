@@ -119,12 +119,14 @@ def _preflight_check(mode: str) -> list[str]:
     enrichment_modes = scrape_modes | {"pdf-import", "photo-import", "dropbox-watch", "csv-import"}
     datasift_modes = {"manage-presets", "manage-sold", "phone-validate"}
 
-    # kansaspublicnotices.com has no login and no CAPTCHA (scraper_ks.py,
-    # confirmed live 2026-08-03 — see docs/OK_KS_SCRAPER_FEASIBILITY.md), so
-    # neither credential is actually required for a KS run. Without this
-    # carve-out, preflight would block every KS run on missing NOTICE_SITE_*/
-    # CAPTCHA_API_KEY env vars that this platform genuinely doesn't use.
-    if mode in scrape_modes and config.NOTICE_PLATFORM != "kansaspublicnotices":
+    # kansaspublicnotices.com and oklahomanotices.com both have no login and
+    # no CAPTCHA (scraper_ks.py confirmed live 2026-08-03, scraper_ok.py
+    # confirmed live 2026-09-14 — see docs/OK_KS_SCRAPER_FEASIBILITY.md and
+    # scraper_ok.py's module docstring), so neither credential is actually
+    # required for a run on either platform. Without this carve-out,
+    # preflight would block every run on missing NOTICE_SITE_*/
+    # CAPTCHA_API_KEY env vars that these platforms genuinely don't use.
+    if mode in scrape_modes and config.NOTICE_PLATFORM not in ("kansaspublicnotices", "oklahomanotices"):
         if not config.NOTICE_SITE_EMAIL or not config.NOTICE_SITE_PASSWORD:
             failures.append("NOTICE_SITE_EMAIL / NOTICE_SITE_PASSWORD not set (required for scraping)")
         if not config.CAPTCHA_API_KEY:
@@ -162,7 +164,21 @@ def _preflight_check(mode: str) -> list[str]:
             failures.append(f"Cannot reach {config.BASE_URL}: {e}")
 
     # ── 2Captcha balance check ──────────────────────────────────────
-    if mode in scrape_modes and config.CAPTCHA_API_KEY:
+    # Same platform carve-out as the credential check above — this is a
+    # SEPARATE gate that isn't automatically covered by that one. Found the
+    # hard way 2026-09-14 setting up a new Kansas Apify Task: a non-empty
+    # placeholder captcha_api_key value (left over from following the old
+    # "put a placeholder in every Task field" guidance) tripped this block
+    # even though kansaspublicnotices doesn't use CAPTCHA at all, hard-
+    # failing preflight with a real 2Captcha rejection. Excluding both
+    # CAPTCHA-free platforms here closes the gap at its actual source
+    # instead of relying on every future Task's captcha_api_key field being
+    # left genuinely empty (not just a placeholder) to avoid it.
+    if (
+        mode in scrape_modes
+        and config.CAPTCHA_API_KEY
+        and config.NOTICE_PLATFORM not in ("kansaspublicnotices", "oklahomanotices")
+    ):
         import requests as _requests
         try:
             resp = _requests.get(
@@ -473,6 +489,20 @@ async def actor_main() -> None:
                     seen_ids=seen_ids,
                 )
                 await persist_seen_ids(seen_ids)
+            elif config.NOTICE_PLATFORM == "oklahomanotices":
+                if proxy_url or start_page != 1:
+                    Actor.log.warning(
+                        "proxy_url/start_page are not supported by scraper_ok.py — ignoring "
+                        "for this oklahomanotices run",
+                    )
+                from scraper_ok import scrape_all_ok
+                notices = await scrape_all_ok(
+                    mode=mode, searches=searches,
+                    since_date_override=since_date_override or None,
+                    llm_api_key=config.ANTHROPIC_API_KEY or None,
+                    seen_ids=seen_ids,
+                )
+                await persist_seen_ids(seen_ids)
             else:
                 notices = await scrape_all(
                     mode=mode, searches=searches, proxy_url=proxy_url, on_batch=push_batch,
@@ -482,6 +512,8 @@ async def actor_main() -> None:
                     seen_ids=seen_ids,
                     on_search_complete=persist_seen_ids,
                 )
+            raw_scraped = len(notices)
+
             # Handle async probate lookup before pipeline (requires await)
             probate_notices = [n for n in notices if n.notice_type == "probate" and n.decedent_name and not n.address]
             if probate_notices:
@@ -507,12 +539,47 @@ async def actor_main() -> None:
                 source_label="Apify Actor",
             )
             notices = run_enrichment_pipeline(notices, opts)
+            total = len(notices)
+
+            # ── Volume anomaly check ─────────────────────────────────
+            # A run that finishes cleanly (no exception) but produces zero or
+            # anomalously few records looks identical to Apify/downstream as
+            # a normal quiet day — nothing here raises, so nothing upstream
+            # catches it. Track a rolling per-Task history in KVS (each Task
+            # has its own default KVS store, so MO/NM/KS histories don't mix)
+            # and always notify Slack, even on a 0-record run, so a real
+            # source/pipeline failure can't hide behind "no message = fine".
+            async def _record_and_check_volume_anomaly(total_now: int, raw_now: int) -> str | None:
+                from slack_notifier import evaluate_volume_anomaly
+                try:
+                    history = await kvs.get_value("daily_totals_history") or []
+                except Exception:
+                    history = []
+                warning = evaluate_volume_anomaly(total_now, raw_now, history)
+                history.append({"date": datetime.now().strftime("%Y-%m-%d"), "total": total_now})
+                try:
+                    await kvs.set_value("daily_totals_history", history[-30:])
+                except Exception as e:
+                    Actor.log.warning("Failed to persist daily_totals_history to KVS: %s", e)
+                return warning
+
+            volume_warning = await _record_and_check_volume_anomaly(total, raw_scraped)
+            if volume_warning:
+                Actor.log.warning(volume_warning)
 
             if not notices:
                 Actor.log.warning("No notices found")
+                if do_notify_slack and config.SLACK_WEBHOOK_URL:
+                    try:
+                        from slack_notifier import notify_warning
+                        notify_warning(
+                            f"Run completed with 0 exported notices (raw scraped: {raw_scraped}).",
+                            context=(volume_warning or "No anomaly vs recent history — likely a genuinely quiet day.")
+                            + f" | platform={config.NOTICE_PLATFORM} counties={counties or 'all'} mode={mode}",
+                        )
+                    except Exception as e:
+                        Actor.log.warning("Slack empty-run notification failed: %s", e)
                 return
-
-            total = len(notices)
 
             # ── Tracerfy Skip Trace (DP candidates only) ────────────
             # Only run Tracerfy on records that need deep prospecting
@@ -667,7 +734,16 @@ async def actor_main() -> None:
 
             if do_notify_slack and config.SLACK_WEBHOOK_URL:
                 try:
-                    from slack_notifier import send_slack_notification, _send_webhook
+                    from slack_notifier import send_slack_notification, _send_webhook, notify_warning
+
+                    # Flag anomalously-low (but non-zero) volume runs ahead of
+                    # the normal summary, so a "success" run that's quietly
+                    # far below its recent baseline doesn't read as routine.
+                    if volume_warning:
+                        notify_warning(
+                            volume_warning,
+                            context=f"platform={config.NOTICE_PLATFORM} counties={counties or 'all'} mode={mode}",
+                        )
 
                     # Send standard run summary with cost breakdown
                     send_slack_notification(
@@ -1912,6 +1988,14 @@ def _run_scrape_pipeline(args, searches) -> None:
             since_date_override=args.since,
             max_notices=args.max_notices,
             headless=not args.headed,
+        ))
+    elif config.NOTICE_PLATFORM == "oklahomanotices":
+        from scraper_ok import scrape_all_ok
+        notices = asyncio.run(scrape_all_ok(
+            mode=args.mode, searches=searches,
+            llm_api_key=config.ANTHROPIC_API_KEY or None,
+            since_date_override=args.since,
+            max_notices=args.max_notices,
         ))
     else:
         notices = asyncio.run(scrape_all(

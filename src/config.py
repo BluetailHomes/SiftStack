@@ -43,6 +43,12 @@ LOG_DIR.mkdir(exist_ok=True)
 NOTICE_PLATFORMS: dict[str, str] = {
     "mopublicnotices": "https://www.mopublicnotices.com",
     "newmexicopublicnotices": "https://www.newmexicopublicnotices.com",
+    # The public-facing domain proxies to opa.eclipping.org for its actual
+    # search/results/PDF endpoints — scraper_ok.py talks to that backend
+    # directly (confirmed live 2026-09-14; see scraper_ok.py's module
+    # docstring). This entry stays pointed at the public domain since it's
+    # only used for the preflight connectivity check and documentation, not
+    # by scraper_ok.py itself.
     "oklahomanotices": "https://www.oklahomanotices.com",
     "kansaspublicnotices": "https://kansaspublicnotices.com",
     "tnpublicnotice": "https://www.tnpublicnotice.com",
@@ -407,24 +413,33 @@ COUNTIES: dict[str, CountyProfile] = {
               "Bernalillo: 'active' is documentation-only, not read anywhere as a functional gate — there "
               "is still NOT yet a real scheduled Apify Task for NM (see Bernalillo's notes).",
     ),
-    # ── Oklahoma — NOT scraper-compatible with the current automation ──
+    # ── Oklahoma — dedicated scraper built 2026-09-14 ──
     "oklahoma": CountyProfile(
         county="Oklahoma", state="OK", state_full="Oklahoma",
-        notice_platform="oklahomanotices", scraper_ready=False, active=False,
+        notice_platform="oklahomanotices", scraper_ready=True, active=False,
         major_city="Oklahoma City", zip_prefixes=["731", "730"],
         assessor_url="https://docs.oklahomacounty.org/AssessorWP5/DefaultSearch.asp",
         court_records_url="https://www.oscn.net/dockets/Search.aspx",
-        notes="oklahomanotices.com's search backend is opa.eclipping.org — a different vendor than the "
-              "ASP.NET WebForms platform this scraper automates. Needs dedicated scraper development; "
-              "not something to fake with unverified selectors.",
+        notes="src/scraper_ok.py built 2026-09-14 — oklahomanotices.com's real backend "
+              "(opa.eclipping.org) needs no login/CAPTCHA/browser session at all, just plain HTTP "
+              "requests (confirmed live; see scraper_ok.py's module docstring for the full "
+              "investigation). PDF has a real extractable text layer (no OCR). Page-level search "
+              "results (no per-notice excerpt like KS) are fully segmented per page via a "
+              "'Published in the...' footer boundary, then each segment's own court-venue caption "
+              "is verified against the target county/state before being trusted — confirmed live "
+              "this matters: a same-search hit surfaced a genuine Sebastian County, Arkansas probate "
+              "notice inside a local Tulsa paper. active=False pending a real scheduled run and "
+              "county-active review, same precedent as NM/KS before their first clean runs.",
     ),
     "tulsa": CountyProfile(
         county="Tulsa", state="OK", state_full="Oklahoma",
-        notice_platform="oklahomanotices", scraper_ready=False, active=False,
+        notice_platform="oklahomanotices", scraper_ready=True, active=False,
         major_city="Tulsa", zip_prefixes=["741", "740"],
         assessor_url="https://assessor.tulsacounty.org/Property/Search",
         court_records_url="https://www.oscn.net/dockets/Search.aspx",
-        notes="Same caveats as Oklahoma County (not scraper-compatible yet).",
+        notes="Same scraper_ok.py build as Oklahoma County — see that county's notes. Live-verified "
+              "2026-09-14 against real Tulsa County probate estates (e.g. 'IN THE MATTER OF THE "
+              "ESTATE OF Mary Iola Haxel Brown, Deceased. Case No. PB-2025-0035').",
     ),
     # ── Kansas — dedicated scraper built and live-verified 2026-08-04 ──
     "johnson": CountyProfile(
@@ -552,6 +567,12 @@ STATE_NAMES: dict[str, str] = {p.state: p.state_full for p in COUNTIES.values()}
 # separate data structure) purely so --counties/--types filtering and the
 # platform-dispatch machinery in main.py work the same way as every other
 # county without a special case.
+#
+# Oklahoma/Tulsa County (OK) also have no real "saved search" concept —
+# scraper_ok.py submits "probate" as a literal free-text search term
+# against opa.eclipping.org directly, same reasoning as Johnson County KS
+# above (kept as SavedSearch entries purely so --counties/--types filtering
+# and platform-dispatch work the same way as every other county).
 SAVED_SEARCHES: list[SavedSearch] = [
     SavedSearch("Jackson", "probate", "Jackson County Probate"),
     SavedSearch("Clay", "probate", "Clay County Probate"),
@@ -560,6 +581,18 @@ SAVED_SEARCHES: list[SavedSearch] = [
     SavedSearch("Bernalillo", "probate", "probate"),
     SavedSearch("Sandoval", "probate", "probate"),
     SavedSearch("Johnson", "probate", "probate"),
+    # Oklahoma/Tulsa deliberately do NOT share a saved_search_name the way
+    # Bernalillo/Sandoval do — NM's two counties are genuinely one combined
+    # site-side query, but scraper_ok.py runs a separate search per county
+    # (each scoped to that county's own publication list via a live lookup
+    # — see scraper_ok.py's module docstring). Giving them the same name
+    # here would make _dedupe_by_saved_search_name() silently collapse them
+    # to one search and drop the other county entirely — confirmed live
+    # 2026-09-14: an initial version of this file with both named "probate"
+    # produced a real Apify run that only ever searched Oklahoma County,
+    # with Tulsa silently missing from every log line.
+    SavedSearch("Oklahoma", "probate", "oklahoma-probate"),
+    SavedSearch("Tulsa", "probate", "tulsa-probate"),
 ]
 
 # ── Entity Detection ──────────────────────────────────────────────────

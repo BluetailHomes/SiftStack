@@ -780,6 +780,66 @@ def run_enrichment_pipeline(
         except Exception as e:
             logger.warning("  MO probate property lookup failed: %s", e)
 
+    # Kansas (Johnson County only — added 2026-09-14, same structural gap
+    # as MO/NM, confirmed for KS by CLAUDE.md's Kansas validation-drop-
+    # rate writeup: ~49% of scraped probate notices dropped for "missing
+    # address"). See ks_parcel_lookup.py's module docstring — unlike NM's
+    # OSE service and Clay's ArcGIS FeatureServer, Johnson County's site
+    # has no clean `/query` REST API, but its own owner-search
+    # autocomplete turned out to be backed by two plain unauthenticated
+    # HTTP endpoints, so this doesn't need Playwright either.
+    probate_no_addr_ks = [
+        n for n in notices
+        if n.notice_type == "probate"
+        and not n.address.strip()
+        and n.decedent_name.strip()
+        and n.county.lower() == "johnson"
+    ]
+    if probate_no_addr_ks:
+        logger.info(
+            "── Step 3c: Probate Property Lookup — KS (%d candidates) ──",
+            len(probate_no_addr_ks),
+        )
+        try:
+            from ks_parcel_lookup import probate_property_lookup_ks
+            probate_property_lookup_ks(probate_no_addr_ks)
+            found = sum(1 for n in probate_no_addr_ks if n.address.strip())
+            logger.info("  Property address found: %d/%d", found, len(probate_no_addr_ks))
+        except ImportError:
+            logger.warning("  ks_parcel_lookup not available — skipping")
+        except Exception as e:
+            logger.warning("  KS probate property lookup failed: %s", e)
+
+    # Cass County, MO — added 2026-09-14. Same structural gap as
+    # Clay/NM/Johnson. mo_parcel_lookup.py's 2026-08-09 scoping pass had
+    # flagged Cass as lacking an obvious API — see mo_cass_parcel_lookup.py's
+    # module docstring for the real (non-REST, HTML-scrape) endpoint found
+    # since then, and for the robots.txt policy call this required before
+    # building. Kept as its own module/branch rather than folded into
+    # mo_parcel_lookup.py's Clay logic — different data shape entirely (HTML
+    # table scrape vs. ArcGIS JSON query).
+    probate_no_addr_cass = [
+        n for n in notices
+        if n.notice_type == "probate"
+        and not n.address.strip()
+        and n.decedent_name.strip()
+        and n.county.lower() == "cass"
+    ]
+    if probate_no_addr_cass:
+        logger.info(
+            "── Step 3c: Probate Property Lookup — Cass (%d candidates) ──",
+            len(probate_no_addr_cass),
+        )
+        try:
+            from mo_cass_parcel_lookup import probate_property_lookup_cass
+            probate_property_lookup_cass(probate_no_addr_cass)
+            found = sum(1 for n in probate_no_addr_cass if n.address.strip())
+            logger.info("  Property address found: %d/%d", found, len(probate_no_addr_cass))
+        except ImportError:
+            logger.warning("  mo_cass_parcel_lookup not available — skipping")
+        except Exception as e:
+            logger.warning("  Cass probate property lookup failed: %s", e)
+
     # ── Step 4: Parcel Address Lookup ────────────────────────────────
     if not opts.skip_parcel_lookup and not opts.skip_tax:
         candidates = [
