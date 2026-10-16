@@ -140,8 +140,28 @@ def run(key: str, tags: list[str], dry_run: bool) -> dict:
     must = {"any_tags": tuuids, "must_not": {"any_property_status": ["prospecting"]}}
     rows = search_records(key, must)
     rows = [r for r in rows if (r.get("status") or None) not in ALLOWED_STATUSES]
-    stats["candidates"] = len(rows)
     LOG.info("%d guarded records in a non-prospecting status", len(rows))
+
+    # STOP / opt-out safety net, regardless of status: an owner flagged DNC or
+    # opt-out, or any phone on the record carrying a DNC status (a STOP reply
+    # synced from smrtPhone, or a litigator number marked DNC by hand), must
+    # never keep receiving automated texts.
+    seen = {r["uuid"] for r in rows}
+    for extra in (
+        {"any_tags": tuuids, "dnc": 1},
+        {"any_tags": tuuids, "opt_out": 1},
+        {"any_tags": tuuids, "any_phone_status": ["DNC", "CORRECT_DNC", "WRONG_DNC"]},
+    ):
+        try:
+            for r in search_records(key, extra):
+                if r["uuid"] not in seen:
+                    seen.add(r["uuid"])
+                    r["_reason"] = "dnc/opt-out"
+                    rows.append(r)
+        except Exception as e:  # noqa: BLE001
+            LOG.warning("opt-out search failed for %s: %s", extra, e)
+    stats["candidates"] = len(rows)
+    LOG.info("%d candidates after adding DNC/opt-out records", len(rows))
 
     for r in rows:
         pu = r["uuid"]
@@ -155,7 +175,7 @@ def run(key: str, tags: list[str], dry_run: bool) -> dict:
             continue
         stats["with_running_drip"] += 1
         for h in drips:
-            label = f"{r.get('status')} / {h.get('name')} / next={h.get('next_step')} in {h.get('next_in')}"
+            label = f"{r.get('_reason') or r.get('status')} / {h.get('name')} / next={h.get('next_step')} in {h.get('next_in')}"
             if dry_run:
                 LOG.info("DRY RUN would remove %s from drip (%s)", pu, label)
                 continue
