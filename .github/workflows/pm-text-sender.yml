@@ -1,0 +1,94 @@
+name: PM Text Sender + Caller Audit
+
+# Two scheduled jobs for the Jackson Priority 1 niche flow (see src/pm_text_sender.py):
+#
+#   pm-texts  4:30 PM Central, Mon-Fri. Plans (and, once enabled, sends) the
+#             afternoon voicemail follow-up text to every number Rahaf left a
+#             voicemail on that day. DRY RUN by default: nothing is sent until
+#             the repo variable PM_TEXTS_LIVE is set to "true"
+#             (Settings -> Secrets and variables -> Actions -> Variables).
+#   audit     7:15 PM Central, Mon-Fri. Posts the end-of-day caller checklist
+#             (unmarked numbers, line caps, missed callbacks, legacy tagging) to Slack.
+#
+# GitHub cron is UTC and has no time zone, so each job has two crons (CDT and
+# CST) and the script's --only-between gate makes the wrong one a no-op.
+# GitHub can also start scheduled jobs late under load; a pm-texts run that
+# lands after 17:00 Central does nothing rather than texting at dinner time.
+
+on:
+  schedule:
+    - cron: '30 21 * * 1-5'   # 16:30 CDT  (pm-texts)
+    - cron: '30 22 * * 1-5'   # 16:30 CST  (pm-texts)
+    - cron: '15 0 * * 2-6'    # 19:15 CDT  (audit)
+    - cron: '15 1 * * 2-6'    # 19:15 CST  (audit)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Which job to run
+        type: choice
+        options: [pm-texts, audit]
+        default: pm-texts
+      day:
+        description: Optional YYYY-MM-DD to backtest (always a dry run)
+        required: false
+
+jobs:
+  pm-texts:
+    if: >-
+      github.event.schedule == '30 21 * * 1-5' || github.event.schedule == '30 22 * * 1-5'
+      || (github.event_name == 'workflow_dispatch' && inputs.mode == 'pm-texts')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Afternoon voicemail texts (dry run unless PM_TEXTS_LIVE is "true")
+        env:
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          SMRTPHONE_API_TOKEN: ${{ secrets.SMRTPHONE_API_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          LIVE: ${{ vars.PM_TEXTS_LIVE }}
+          DAY: ${{ inputs.day }}
+        run: |
+          ARGS="pm-texts --slack"
+          if [ "$LIVE" = "true" ] && [ -z "$DAY" ]; then ARGS="$ARGS --send"; fi
+          if [ -n "$DAY" ]; then ARGS="$ARGS --day $DAY"; fi
+          if [ "${{ github.event_name }}" = "schedule" ]; then ARGS="$ARGS --only-between 16:15-17:00"; fi
+          echo "python src/pm_text_sender.py $ARGS"
+          python src/pm_text_sender.py $ARGS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pm-texts-${{ github.run_id }}
+          path: output/pm_texts/
+          if-no-files-found: ignore
+
+  audit:
+    if: >-
+      github.event.schedule == '15 0 * * 2-6' || github.event.schedule == '15 1 * * 2-6'
+      || (github.event_name == 'workflow_dispatch' && inputs.mode == 'audit')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: End-of-day caller audit
+        env:
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DAY: ${{ inputs.day }}
+        run: |
+          ARGS="audit --slack"
+          if [ -n "$DAY" ]; then ARGS="$ARGS --day $DAY"; fi
+          if [ "${{ github.event_name }}" = "schedule" ]; then ARGS="$ARGS --only-between 19:00-20:00"; fi
+          python src/pm_text_sender.py $ARGS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: audit-${{ github.run_id }}
+          path: output/pm_texts/
+          if-no-files-found: ignore

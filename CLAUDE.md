@@ -14,6 +14,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 6. **Lead Management:** 4 Pillars of Motivation auto-qualification, STABM daily routine, pipeline reporting, deep prospecting (4-level framework)
 7. **Operations:** Acquisition playbook generator (SOPs, scripts, checklists), Slack/Discord notifications, Google Drive upload, Apify Actor deployment
 
+**⏸ PRODUCTION PAUSED 2026-09-29, scope narrowed 2026-10-06.** All 4 Apify schedules (MO `irDDOAu0oVG1kdQvr`, NM `f5eGSQ0If5J50xrZx`, KS `c7OJT1cG8PzJayuwq`, OK `ABj82kJNqoI1kmN9C`) are disabled (`isEnabled: false`), and the `.github/workflows/stage2-datasift-upload.yml` GitHub Actions workflow is disabled (`disabled_manually`) — no scraping, enrichment, or DataSift upload is running for any county right now. Originally paused pending a meeting with Ty Garret (SiftStack's creator) — **that meeting is no longer happening.** As of 2026-10-06, Kaycie has narrowed active focus to **Jackson County, MO only** and is piloting a different lead source for it: 16 native DataSift SiftMap presets built directly off a Doors-Per-Deal export (price/ZIP/equity-filtered investor-activity targeting), plus a separate Obituary track and 4 targeted county-record pulls — see "Jackson County MO Build Sheet" below for the full locked plan — rather than continuing to rely on this repo's first-to-market county-scraper pipeline for now. Existing leads already scraped/enriched across all 9 counties pre-pause are being triaged this week — Rahaf following up Wed/Thu (10/7-10/8), then archiving (not deleting) anything that isn't already an active seller conversation, logging the archive reason per record so the first-to-market approach's real performance can be assessed later rather than guessed at. Nothing in this repo's scraper/Apify infrastructure was deleted — all 4 schedules and the workflow still exist with their original cron/config, just flagged off. **To resume:** `PUT /v2/schedules/{id}` with `{"isEnabled": true}` for each schedule, and re-enable the workflow via `POST /repos/BluetailHomes/SiftStack/actions/workflows/321011465/enable` (or GitHub's UI: Actions tab → Stage 2 - DataSift Upload → "Enable workflow"). No code changes were made — this is purely a scheduling pause.
+
 **Markets & Data Sources.** Bluetail's active markets span 9 counties across 4 states: Missouri (Jackson, Clay, Platte, Cass), Kansas (Johnson), New Mexico (Bernalillo, Sandoval), Oklahoma (Oklahoma, Tulsa) — Tennessee (Knox, Blount) is legacy/dormant, not part of the active footprint. Every module keys off the `COUNTIES` registry in `src/config.py` — see that file for the full per-county data (state, notice platform, assessor/court URLs, zip prefixes). Summary:
 
 | County | State | Notice site | Scraper status |
@@ -27,6 +29,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Property-address lookup tiers (probate notices never carry one in the notice text itself — see "Probate Deep Prospecting" below) exist today for Knox (Tax API), Bernalillo/Sandoval (NM OSE ArcGIS), Clay and Cass (MO — ArcGIS FeatureServer and an HTML deed-holder search respectively), and Johnson (KS — two plain unauthenticated HTTP endpoints behind the site's own owner-name autocomplete). Jackson and Platte, MO have no lookup: Jackson's public GIS layers carry geometry/tax-district data only, no owner/address fields; Platte's assessor portal (Beacon/Schneider Corp) returns a Cloudflare WAF block on the actual search request (confirmed live 2026-09-14, not just an unauthenticated-request 403 — a real anti-automation control, not attempted further). Oklahoma has no lookup tier yet either — out of scope for the 2026-09-14 scraper build, same "pass through unfiltered rather than guess" behavior as Jackson/Platte applies to it for now. See each `CountyProfile.assessor_url`/`court_records_url` in `config.py` for reference-only links, and each profile's `notes` field for known caveats.
 
 8. **REI Skill Library:** 13 Claude Co-Work skill files (`.skill`/`.plugin` ZIPs) for distribution to DataSift community via [learn.datasift.ai/claude-skills-rei](https://learn.datasift.ai/claude-skills-rei). Skills teach Claude specific REI workflows when uploaded to Co-Work sessions or Projects.
+
+## Jackson County MO Build Sheet (2026-10-06) — active Priority 1 strategy
+
+Kaycie's locked plan for the Jackson County pivot referenced in the pause banner above. Source: *Jackson County MO Build Sheet: Priority 1, Obituary, County Records* (Bluetail Homes, Oct 6 2026), built from DataSift's own Doors Per Deal export for Jackson County (FIPS 29095, measured 2026-08-11, window Jan–Jun 2026: 74.2 doors/deal baseline, 2,886 investor deals / 214,197 SFR homes). This is a **native DataSift SiftMap/preset build**, not an account-blueprint import — the account-blueprint investigation earlier in this file's history is effectively closed out by this plan; the custom-fields gap it surfaced (7 real fields vs. 15 this file documents in the CSV upload structure below) isn't a blocker here since the one field this plan actually uses, Personal Representative, already exists live.
+
+**Decisions locked 2026-10-06:**
+- Price: AVM under $150K first (43.8 doors/deal, wave 1), then $150K–$200K (65.3 doors/deal, wave 2 — add once wave 1 is worked). Bands at $200K+ fall below the county baseline and are left out entirely.
+- Core ZIPs on the big (non-specialty) lists: 64130, 64128, 64133, 64052, 64134, plus 64111/64112 pending a momentum check. Account-wide suppression of every ZIP with zero investor transactions (sourced from Market Finder pages 3-6, not available via API — needs a logged-in session pass to build).
+- Equity: suppress low/negative equity on general presets; **never** a minimum % floor, because it silently drops unknown-equity records — the same design rule this repo's own `HARD_DROP_EQUITY_PERCENT`/`LOW_EQUITY_FLAG_PERCENT` gate follows (see "High-Potential Lead Filter" below), just implemented as a native SiftMap preset filter here rather than a pipeline step. Free & Clear (Equity % = 100) includes the Unknown-equity box, tagged `Unknown Equity`. Two stacks (Absentee + Negative Equity, Absentee + Low Equity) define their own equity and are exempt from the general suppression rule.
+- First wave: 16 Priority 1 presets (rungs 1–16 of DataSift's own Work Order), built in doors-per-deal order so each rung only adds what prior rungs didn't already cover — reaches ~8,451 live doors / 19.6% of Jackson's investor deals before ZIP/price cuts lower that count. Rungs 18 and 20-24 are a second wave; rungs 17/19 (AI-score) need a separate AI plan and are skipped for now. Specialty lists (Inheritance, Notice of Default, Probate, Judgment Lien, Tax Delinquent, Estate Sale, Zombie) are pulled **county-wide**, not ZIP/price-filtered — only the general "big stack" presets get geography/price cuts.
+- MO's 14-day disclosure workflow is confirmed cleared — outreach can start as soon as records are skip-traced.
+- A separate Obituary track (759 Jackson homes flagged since Dec 2025, ~95/month, tagged `Obituary` not `Priority 1`) runs alongside the presets, not instead of them — DataSift's own model puts it at 34 doors/deal (base case), but most of these homes won't sell until 2027, so it's judged on contact/qualified-lead rate until then, not closed deals. Cross-check new obituary adds against the Inheritance and Probate lists so one family isn't worked twice.
+- 4 targeted county-record pulls fill gaps SiftMap's provider data doesn't cover: Tax Delinquent roll (Collector of Revenue, monthly — flagged as the one gap SiftMap can't buy at all, since it shows low/zero there), Notice of Default/Trustee Sale (Recorder of Deeds online index, weekly), Probate filings (16th Judicial Circuit Probate Division, weekly), and Mechanic's/Tax/HOA liens (same Recorder portal, lower priority — HOA Lien is a second-wave rung, Judgment Lien is already covered by a DataSift list). Every county-record pull gets tagged `FTM` plus source/pull-month, matched against existing DataSift records first so no already-worked seller is re-contacted as new, and never merged with a DataSift duplicate without approval.
+
+**Where this overlaps with (and diverges from) this repo's own scraper — worth checking before resuming anything:**
+- **Probate filings (rung 4)** is the one real overlap: the paused MO Apify schedule already scrapes Jackson probate notices from mopublicnotices.com. If resumed, it could in principle replace the manual weekly courthouse pull described above — but nothing is scheduled to resume automatically; see the pause banner.
+- **Notice of Default/Trustee Sale (rungs 2–3)** is *not* currently scraped anywhere in this repo. MO's 4 counties (Jackson, Clay, Platte, Cass) each have exactly one saved search, and it's probate-only (see "Saved Searches" below) — building scraper coverage for this notice type would need a new saved search added on the DataSift Smart Search dashboard plus a new `config.py` entry, not just a schedule resume.
+- **Property-address gap confirmed on both sides, independently.** This repo has no Jackson property-address lookup tier (Jackson's public GIS layers are geometry/tax-district only, no owner/address fields — see "Markets & Data Sources" above and "MO Property-Address Lookup Tier" below). The build sheet hits the identical wall from the manual county-pull side: "Filings rarely carry a property address, so each needs a parcel lookup." Neither path has solved this for Jackson specifically (Clay and Cass do have lookup tiers; Jackson and Platte don't — see `mo_parcel_lookup.py` / `mo_cass_parcel_lookup.py`).
+
+**Known blocker (as of 2026-10-06):** the per-rung SiftMap count check (comparing each preset's live record count against the build table's ladder numbers) could not be completed by browser automation — the Custom Combination distressor-filter selection didn't persist through the session (count never moved off the 214,730 county base, picks cleared whenever the dropdown closed). The county base count did verify clean (214,730 live vs. 214,197 in the Aug 11 export, within 0.3%). Per-rung counts need to be done by hand per the build sheet's own 4-step procedure (SiftMap → Custom Combination, "All selected" → Apply Filter → compare to the ladder number → add price band + ZIPs via Advanced Geography). Nothing was saved, tagged, imported, or changed in the DataSift account during this investigation.
 
 ## Commands
 
@@ -469,6 +491,17 @@ python src/main.py daily --notify-slack            # send run summary to Slack/D
 - `DATASIFT_PASSWORD` — DataSift login password
 - `SLACK_WEBHOOK_URL` — Slack/Discord webhook for run summaries
 
+### Afternoon voicemail texts + caller audit (`src/pm_text_sender.py`, built 2026-10-20)
+
+Rahaf's Jackson P1 attempt = automated morning text (drip), call, voicemail, afternoon text to every number she left a voicemail on. The afternoon text was the one manual step and on launch day (2026-10-19) 0 of 47 went out, so it's now a scheduled job (`.github/workflows/pm-text-sender.yml`, 4:30 PM Central Mon-Fri; a second job posts an end-of-day caller checklist to Slack at 7:15 PM).
+
+- **Voicemail detection** = outbound call by Rahaf that smrtPhone logged as *answered* for ≥20s, on a number she marked **No Answer** that day. Backtested against transcripts of all 72 launch-day recordings (two independent audio-model passes, only agreements counted): 45 of 48 real voicemails matched, 3 misfires. Her phone mark is the gate, so "mark every number you dial" is the only manual step left. Hard skips: number later marked Correct/Wrong/Dead/DNC, owner dnc/opt-out, record no longer Prospecting, number replied or called back that day, already texted from an afternoon line that day.
+- **Why not a DataSift drip:** drips text the primary phone (or all Correct phones); only 18 of the 48 voicemail numbers on launch day were the record's primary phone. The script texts the exact number via **smrtPhone's SMS API** — `POST https://phone.smrt.studio/sms/send`, header `X-Auth-smrtPhone: <token>`, form fields `from`/`to`/`message` — which resolves from Kaycie's machine even though `api.smrtphone.io` does not. Verified live 2026-10-20 (HTTP 200 + smsId). An internal line on smrtPhone's own DNC list (e.g. the 955-3574 callback line) returns HTTP 400 "This number is on your DNC list".
+- Day 1-5 wording comes from the record's Call Attempts counter (after today's bump, or +1 if not bumped yet). Round-robin across the three afternoon lines, hard cap 25 per line per day; overflow is reported, never sent. Scheduled sends only inside 16:15-17:00 Central (`--only-between`), so a GitHub-delayed run can't text at dinner time. Two crons per job (CDT/CST) because GitHub cron has no time zone.
+- **Dry run by default.** Sends only when the repo Actions variable `PM_TEXTS_LIVE` is `"true"`. Needs repo secret `SMRTPHONE_API_TOKEN` (same value as `.env`). Backtest any day with `python src/pm_text_sender.py pm-texts --day YYYY-MM-DD`; `audit --day YYYY-MM-DD` prints the checklist. Plans/results land in `output/pm_texts/`.
+- **Open question (2026-10-20):** whether an SMS sent through smrtPhone's API shows up on the DataSift record the way Rahaf's manual texts do. The REISift integration doc says all call/SMS events log, but it's unverified — test with a text to a known test record before trusting the "already texted today" check.
+- **Found while building this:** the drip exit guard (`src/drip_exit_guard.py` + its workflow) only existed on branch `drip-exit-guard`; GitHub runs schedules from the default branch only, so it had never fired. Merged to `main` 2026-10-20.
+
 ### Login Selectors (SPA quirks)
 - Hidden checkboxes (Remember me, Terms) — click `<label>` elements, not `<input>`
 - Use `wait_until="domcontentloaded"` (not `networkidle` — SPA keeps WebSocket connections open)
@@ -514,8 +547,9 @@ Hard-won patterns from build 1.0.22-1.0.23 (SiftMap, preset management, sequence
 - Flow: open filter panel → scroll to bottom → expand "Filter Presets" → expand folder → click preset → modify → Save (not Save New) → confirm overwrite
 - Folder names have case variations ("00 Niche" vs "00 NICHE") — use `.toUpperCase()` comparison
 - Preset names follow pattern `^\d{2}\.` (e.g., "00. Needs Skipped")
-- 2 folders: "00 Niche Sequential Marketing" (12 presets), "01. Bulk Sequential Marketing" (9 presets)
-- All 21 presets have Property Status "Do not include" → "Sold" (build 1.0.23)
+- **Correction (live read-only audit 2026-10-13):** the two bullets that used to follow here ("2 folders ... 21 presets ... all exclude Sold") do not match the live account. There is no Bulk folder. Actual folders: "00. JACKSON P1 NICHE" (13 presets, built 2026-10-14 — see below), "00. NICHE SEQUENTIAL" (7 presets, old-template names 00. Needs Skipped … 06. Needs First Mail, account-wide with NO Lists/Tags block and no Sold/Not Interested exclusion), "0. MY TASKS", "1. LEAD MANAGEMENT", "2. ACQUISITIONS", "3. TRANSACTIONS" (task-queue views), "COUNTY RECORDS" (FTM, FTM Send to Dialer), "PUEBLO ALTO CALL ATTEMPTS", "REISIFT BASE PRESETS", "DEFAULT".
+- **"00. JACKSON P1 NICHE" (2026-10-14, Kaycie-approved plan):** DataSift's current 12-preset niche template plus "12. Skipped No Numbers", all scoped to Any Tags `Priority 1`, 8-call-attempt ladder (02 = 0 calls, 03 = 1, 04 = 2-7, 05 Needs Mailed = 8+), SMS step kept (01 Ready to Text; 02 requires SMS Attempts ≥ 1), intake presets 01/02 list-gated via Any Custom Lists (OR) to the five lowest doors-per-deal lists (Inheritance, Absentee+NoD, NoD, Probate, Judgment Lien) — add the next list to 01/02 and Save to advance rungs. 07 Callback = Task Count ≥ 1 incomplete (no `callback` tag exists); 09 = Status Not Interested + Last Updated Field: Status, "Last 36 Months prior to Quarter" (= changed before 3 months ago, re-evaluated on load). The existing 7 "00. NICHE SEQUENTIAL" presets were deliberately left untouched.
+- **Live UI facts learned building it:** block is added by typing its name into "Add new filter block" and clicking the dropdown option (block names: Any Tags (OR), All Tags (AND), Any Custom Lists (OR), Property Status, Call/SMS/Direct Mail Attempts, Phone Statuses → renders as "Phone Status Combination", Params & Others, Last Updated Field, Task Count). Set a block's Include/"Do not include" **before** adding chips — toggling after the chips are in does not apply. A reloaded preset always *displays* "Include" even when "Do not include" is stored; the stored rule is what Apply uses (verified by record counts). Save New with a name that already exists in the folder is silently dropped (delete first: row ⋮ → Delete preset → type DELETE FOREVER). The Property Status picker only offers the 12 custom statuses — Sold and DNC are not selectable; DNC/Opt-out are handled via Params & Others. `python src/main.py manage-presets` cannot run locally while `.env` holds a real `APIFY_TOKEN` (config's dotenv load routes `main.py` into Actor mode).
 
 **Sequence Builder Workflow**
 - Flow: `/sequences` → Create → title + folder → drag trigger → condition → actions tab → drag actions → configure → save
@@ -550,49 +584,79 @@ python src/extract_market_finder.py --state "Missouri" --county "Jackson,Clay" -
 # Output: JSON file in output/market_finder_{state}_{county}_{timestamp}.json
 ```
 
-## REI Skill Library (13 Skills)
+## REI Skill Library — three separate things, don't conflate them
 
-Distribution-ready Claude Co-Work skill files at `Skills for REI/improved/`. Each `.skill` is a ZIP containing `SKILL.md` + `references/` folder. Plugins (`.plugin`) also include `commands/` and `.claude-plugin/plugin.json`.
+This project touches three distinct layers. Keeping them separate matters because they have different owners, different update mechanisms, and different rules about who may edit what:
 
-### Skill Inventory
+1. **DataSift's official REI Skill Library** (below) — generic, DataSift-maintained Claude Skills for real estate investing workflows (market research, comps, rehab, deal analysis, CRM setup, call coaching, ops). Lives entirely outside this repo, installed as a Claude Code plugin from DataSift's own marketplace. Auto-updates from upstream. Anyone can install/update it; this repo has no ability to edit it and doesn't try to.
+2. **Bluetail's protected `bluetail-*` skills** — Bluetail-specific customizations, kept deliberately separate from DataSift's upstream library so an upstream update can never silently overwrite them. **Correction (2026-09-25): these do exist** — a 2026-09-21 search of this repo/machine found nothing, but a later session showed a full `bluetail-*` skill set available (`bluetail-rehab-estimator`, `bluetail-real-estate-comping`, `bluetail-deep-prospecting`, `bluetail-outbound-messaging`, `bluetail-sift-crm-workflow`, `bluetail-propstream-data-workflow`, `bluetail-first-market-county-data`, `bluetail-buyer-prospector`, `bluetail-phone-validator`, `bluetail-playbook-creator`, `bluetail-probate-property-finder`, `bluetail-sift-market-research`, and `bluetail-sequential-presets`) — these carry real, Bluetail-specific production logic that diverges materially from the generic DataSift versions (e.g. `bluetail-rehab-estimator` implements "Bluetail Deal Analyzer v3" with property-identity guardrails, seller NEED logic, fee tiers, and a NO-GO template; `bluetail-outbound-messaging` and `bluetail-sift-crm-workflow` reference Bluetail's actual active markets and real SiftLine board names). They live somewhere outside this repo's own file tree and outside this machine's local `~/.claude` config — likely an account- or Project-level Claude skill store rather than a plugin marketplace, since they weren't found by either of those search methods. **Still do not merge, restore, replace, or otherwise modify anything under this name** without first confirming with Kaycie exactly where the canonical source lives and how it's meant to be updated.
+3. **The SiftStack Python codebase** (`src/`, this repo) — the actual scraping/enrichment/Apify Actor pipeline documented everywhere else in this file. Completely independent of both skill layers above; installing or updating DataSift's skill library has zero effect on it, and vice versa.
 
-| # | File | Division | Score | What It Does |
-|---|------|----------|-------|-------------|
-| 1 | `sift-market-research.skill` | Market Intel | 9.6 | Market Finder reports, zip code scoring (6 weights verified against `market_analyzer.py`), 7-sheet Excel output |
-| 2 | `first-market-county-data.skill` | Market Intel | 9.7 | County clerk data extraction for all 7 notice types, FOIA templates, marketing windows |
-| 3 | `buyer-prospector.skill` | Market Intel | 9.6 | Cash buyer list from 84K+ records, LLC/trust/corp research, 50-state SOS URLs |
-| 4 | `real-estate-comping.skill` | Deal Analysis | 9.7 | Two-Bucket ARV, disclosure/non-disclosure routing (12 states), adjustments verified against `comp_analyzer.py` |
-| 5 | `rehab-estimator.skill` | Deal Analysis | 9.8 | 912-line skill, complete Repair Cheat Sheet verified against real contractor SOW, 4-tier system |
-| 6 | `deal-analyzer.plugin` | Deal Analysis | 9.6 | Combined comp+rehab pipeline, MAO (75%/70% rules), multi-loan financing, exit strategy comparison |
-| 7 | `deep-prospecting.skill` | Deal Analysis | 9.6 | 4-level research depth (L1-L4), heir verification loop, DOD sanity check (3yr), 3-site skip trace waterfall |
-| 8 | `probate-property-finder.skill` | Deal Analysis | 9.7 | Property lookup for probate decedents, 3-tier search (Tax API→Executor→People search), confidence scoring |
-| 9 | `phone-validator.skill` | Operations | 9.8 | Trestle API scoring, 5-tier dial priority, 3 tier strategies, litigator risk check, 4.75x connect rate |
-| 10 | `sequential-presets.skill` | Operations | 9.5 | 12 niche + 9 bulk filter presets, Pendulum Theory (SMS→Call→Mail→DP), DataSift UI implementation steps |
-| 11 | `sift-sequences.skill` | CRM | 9.5 | 26 TCA sequence templates (verified against `sequence_templates.py`), UI walkthrough, HOT A01-A16 chains |
-| 12 | `sift-operations.plugin` | CRM | 9.3 | CRM operations encyclopedia, STABM routine, lead pipeline (9 statuses), task presets, team roles |
-| 13 | `playbook-creator.skill` | Operations | 9.5 | Playbook/SOP generator from transcripts, 7-node chart limit, 5th grade reading level, Word doc output |
+### 1. DataSift's Official REI Skill Library (27 skills, as of 2026-09-21)
 
-### Cross-Skill Verified Consistency
+Distributed as a Claude Code plugin marketplace, not the old downloadable `.skill`/`.plugin` ZIPs (see "Prior distribution model" below for how this used to work). Install everything with:
 
-These values are identical across all skills that reference them:
-- **Phone tiers:** 81-100 (Dial First), 61-80 (Dial Second), 41-60 (Dial Third), 21-40 (Dial Fourth), 0-20 (Drop)
-- **Preset folders:** "00 Niche Sequential Marketing" (12 presets), "01. Bulk Sequential Marketing" (9 presets)
-- **Sequence count:** 26 TCA templates across 5 folders (Lead Management 6, Acquisitions 6, Transactions 6, Deep Prospecting 4, Default 4)
-- **Comp adjustments:** Bedroom $5,000, Bathroom $7,500, $/sqft $85, Age $500/yr (from `comp_analyzer.py`)
-- **Financing defaults:** HML 12%, conventional 7%, 2 points, 2.5% closing (from `deal_analyzer.py`)
-- **DOD sanity:** MAX_DOD_GAP_YEARS = 3 (from `obituary_enricher.py`)
-- **Notice types:** 7 total (foreclosure, tax_sale, tax_delinquent, probate, eviction, code_violation, divorce)
+```bash
+claude plugin marketplace add DataSift-Ty-Personal/SiftStack
+claude plugin install siftstack-all@siftstack
+```
 
-### Key Corrections Made During Optimization (April 2026)
-- **Hardcoded credentials removed** from sift-market-research (had email/password in SKILL.md)
-- **Bedroom adjustment corrected** from $10K to $5K in real-estate-comping (matched to `comp_analyzer.py`)
-- **HML points corrected** from 0% to 2% in deal-analyzer (matched to `deal_analyzer.py DEFAULT_HARD_MONEY_POINTS`)
-- **Linux paths fixed** in sequential-presets (was `/home/ubuntu/skills/...`, now relative)
-- **Preset names aligned** across 3 skills to match `niche_sequential.py` source code
-- **Transfer tax labeled** as Tennessee-specific in deal-analyzer with state reference table for top 10 states
-- **"Substantial renovation" defined** in real-estate-comping: kitchen + 1 bath minimum (~$15K spend)
+This installs to the **global** Claude Code plugin cache (`~/.claude/plugins/`), scoped to the user, not this repo — nothing under `src/` or this project's `.claude/` directory is touched by it. Smaller per-division bundles are also available (`siftstack-coaching`, `siftstack-crm`, `siftstack-deal-analysis`, `siftstack-market-intel`, `siftstack-operations`) if the full 27-skill install isn't wanted. A visual org chart of the full DataSift agent/skill roster (including planned/gated ones beyond just these 27 shipped skills) is published at `learn.datasift.ai/agent-org-chart`.
 
-### Skill File Structure
+| Skill | Category | What It Does |
+|---|---|---|
+| `siftstack-core` | Setup | SiftStack doctor and setup — what works right now, what needs a key, what it costs, what to do instead |
+| `sift-market-research` | Market Intelligence | Sift Market Finder research for real estate wholesaling with comprehensive market analysis |
+| `first-market-county-data` | Market Intelligence | Find WHERE to pull county distress lists (probate, foreclosure, tax sale, tax delinquent, eviction, code violation, divorce) for any US county |
+| `buyer-prospector` | Market Intelligence | Build a real estate buyers list for any US county from a nationwide buyer database, categorize entities (LLC/Trust/Corp), research decision-makers for skip tracing |
+| `real-estate-comping` | Deal Analysis | AI-powered property valuation and comparable sales analysis for wholesaling |
+| `rehab-estimator` | Deal Analysis | Estimate rehab costs for investment properties |
+| `deal-analyzer` | Deal Analysis | End-to-end deal analysis: photos → comps → rehab estimate → offer strategy |
+| `comp-package` | Deal Analysis | Build a boundary-filtered comparable sales package for one subject property, delivered as an Excel workbook |
+| `deep-prospecting-v5` | Deal Analysis | Identify heirs/decision-makers and exactly who must sign to sell when an owner is deceased or skip tracing fails |
+| `probate-property-finder` | Deal Analysis | Find real property owned by probate decedents from just the case filing (PR number, decedent name, executor) — no address needed |
+| `phone-validator` | Operations | Score/validate phone numbers via Trestle's phone_intel API, generate DataSift-ready CSVs with phone tags |
+| `sequential-presets` | Operations | Design, build, and manage sequential marketing filter presets in DataSift |
+| `playbook-creator` | Operations | Create playbooks, SOPs, and Scribe-style step guides with process maps and agent-executable SOP files |
+| `caller-reputation-monitor` | Operations | Keep outbound cold-calling numbers out of carrier "Spam Likely / Scam Likely" labels |
+| `candidate-intake` | Operations | Aggregate job applicants from many channels into one scored master sheet, review the ranked list, send screening outreach |
+| `contractor-call-sheet` | Operations | Turn a vetted contractor/vendor directory into a one-page printable call sheet of top picks by trade |
+| `dispo-deal-blast` | Operations | Text one named wholesale deal to the cash buyers whose own deed history says they buy at that price; hand every reply to a human |
+| `team-hiring` | Operations | Plan, post for, interview, and onboard a remote REI team (data manager, prospector, lead manager, acquisitions manager, dispo) |
+| `text-touch-builder` | Operations | Generate a 4-text-touch SMS sequence for hottest DataSift records, personalized and varied per record |
+| `vendor-directory-builder` | Operations | Build a vetted, filterable local service-provider directory by mining a community source |
+| `sift-sequences` | CRM | Create, manage, and ideate Sift sequences (automations) |
+| `sift-operations` | CRM | Comprehensive REI Sift operations encyclopedia — sequences, presets, SiftLine boards, drip campaigns, events, tasks, filters, tags, skip tracing |
+| `account-blueprint` | CRM | Build a DataSift account matching the DataSift reference account structure over the API, with a read-back on every object created |
+| `closer-coach` | Coaching & Performance | Pull acquisitions/closing calls from SmrtPhone, transcribe with tonality notes, grade against the DataSift closer rubric |
+| `cold-call-coach` | Coaching & Performance | Pull cold-call recordings from SmrtPhone, transcribe with tonality notes, grade against the DataSift cold-calling rubric |
+| `lead-manager-coach` | Coaching & Performance | Pull lead-management follow-up/qualification calls from SmrtPhone, transcribe, grade against the DataSift lead manager rubric |
+| `kpi-engine` | Coaching & Performance | Pull and grade cold-calling/lead-gen KPIs straight from DataSift — dials, answer/conversation/contact rates, dispositions |
+
+13 of these (`sift-market-research`, `first-market-county-data`, `buyer-prospector`, `real-estate-comping`, `rehab-estimator`, `deal-analyzer`, `deep-prospecting-v5`, `probate-property-finder`, `phone-validator`, `sequential-presets`, `sift-sequences`, `sift-operations`, `playbook-creator`) are the same skills a prior version of this file documented as "13 Skills" hosted locally in this repo at `Skills for REI/improved/`. That local directory and the skill-authoring/verification work described below **predate this repo's move to consuming DataSift's upstream marketplace** and no longer exist in this repo — DataSift now owns and maintains the skill content directly. The following two subsections are kept as historical record of that prior, locally-hosted version; they have not been re-verified against the current upstream release and should not be assumed still accurate.
+
+<details>
+<summary>Historical record — prior locally-hosted 13-skill version (pre-migration)</summary>
+
+**Cross-Skill Verified Consistency** (as of the local version):
+- Phone tiers: 81-100 (Dial First), 61-80 (Dial Second), 41-60 (Dial Third), 21-40 (Dial Fourth), 0-20 (Drop)
+- Preset folders: "00 Niche Sequential Marketing" (12 presets), "01. Bulk Sequential Marketing" (9 presets)
+- Sequence count: 26 TCA templates across 5 folders (Lead Management 6, Acquisitions 6, Transactions 6, Deep Prospecting 4, Default 4)
+- Comp adjustments: Bedroom $5,000, Bathroom $7,500, $/sqft $85, Age $500/yr (from `comp_analyzer.py`)
+- Financing defaults: HML 12%, conventional 7%, 2 points, 2.5% closing (from `deal_analyzer.py`)
+- DOD sanity: MAX_DOD_GAP_YEARS = 3 (from `obituary_enricher.py`)
+- Notice types: 7 total (foreclosure, tax_sale, tax_delinquent, probate, eviction, code_violation, divorce)
+
+**Key Corrections Made During Optimization (April 2026):**
+- Hardcoded credentials removed from sift-market-research (had email/password in SKILL.md)
+- Bedroom adjustment corrected from $10K to $5K in real-estate-comping (matched to `comp_analyzer.py`)
+- HML points corrected from 0% to 2% in deal-analyzer (matched to `deal_analyzer.py DEFAULT_HARD_MONEY_POINTS`)
+- Linux paths fixed in sequential-presets (was `/home/ubuntu/skills/...`, now relative)
+- Preset names aligned across 3 skills to match `niche_sequential.py` source code
+- Transfer tax labeled as Tennessee-specific in deal-analyzer with state reference table for top 10 states
+- "Substantial renovation" defined in real-estate-comping: kitchen + 1 bath minimum (~$15K spend)
+
+**Prior distribution model** (superseded by the plugin-marketplace install above):
 ```
 skill-name.skill (ZIP containing):
 ├── SKILL.md              # Main skill instructions
@@ -613,3 +677,12 @@ plugin-name.plugin (ZIP containing):
 │       └── references/
 └── README.md
 ```
+</details>
+
+### 2. Bluetail's protected `bluetail-*` skills
+
+Not present anywhere in this repo or on this machine as of 2026-09-21 (see the search note in the intro above). Treat as a placeholder section until their actual location is confirmed — **do not merge, restore, replace, or otherwise modify anything under this name without first locating the real source**, and do not assume the DataSift install above has any relationship to them beyond sharing the general "SiftStack" project name.
+
+### 3. The SiftStack Python codebase
+
+Everything else in this file — `src/`, the Apify Actor, the enrichment pipeline, the 9-county scraper infrastructure. See the rest of this document.
