@@ -16,7 +16,7 @@ Usage:
   python src/sms_auto_responder.py --since-minutes 1500 --dry-run  # classify only, write nothing
   python src/sms_auto_responder.py --mode auto                     # refuses until SEND is wired
 
-Env: REISIFT_API_KEY (required), ANTHROPIC_API_KEY (required), SLACK_WEBHOOK_URL (optional),
+Env: REISIFT_API_KEY (required), ANTHROPIC_API_KEY (required), SLACK_WEBHOOK_URL / GOOGLE_CHAT_WEBHOOK_URL (optional),
      SMS_RESPONDER_MODEL (optional, default claude-sonnet-5-5), OUR_LINES (optional, comma list).
 """
 from __future__ import annotations
@@ -243,13 +243,15 @@ def classify(rules: str, ctx: dict, model: str) -> dict | None:
 
 
 def slack(text: str) -> None:
-    url = os.environ.get("SLACK_WEBHOOK_URL")
-    if not url:
-        return
-    try:
-        requests.post(url, json={"text": text}, timeout=15)
-    except Exception as e:  # noqa: BLE001
-        log.warning("Slack post failed: %s", e)
+    """Post to every chat webhook that is configured (Slack and/or Google Chat; both take {"text": ...})."""
+    for name, env in (("Slack", "SLACK_WEBHOOK_URL"), ("Google Chat", "GOOGLE_CHAT_WEBHOOK_URL")):
+        url = os.environ.get(env)
+        if not url:
+            continue
+        try:
+            requests.post(url, json={"text": text}, timeout=15)
+        except Exception as e:  # noqa: BLE001
+            log.warning("%s post failed: %s", name, e)
 
 
 def handle(ds: DataSift, rules: str, ev: dict, mode: str, dry_run: bool, model: str, our_lines: set[str]) -> dict:
