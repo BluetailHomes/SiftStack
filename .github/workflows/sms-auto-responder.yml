@@ -1,0 +1,52 @@
+name: SMS auto-responder (draft mode)
+
+# Watches DataSift for inbound texts on the Jackson P1 drip, classifies each one against
+# docs/sms_reply_rules.md, and writes a suggested reply + proposed changes to the record's
+# message board (and Slack). Draft mode sends NOTHING to sellers. See src/sms_auto_responder.py.
+#
+# Runs every 5 minutes, 7:00 AM to 10:55 PM Central (12:00-03:55 UTC). GitHub may delay
+# scheduled runs; the 20-minute lookback plus message-board markers keep it idempotent.
+
+on:
+  schedule:
+    - cron: "*/5 12-23 * * *"
+    - cron: "*/5 0-3 * * *"
+  workflow_dispatch:
+    inputs:
+      since_minutes:
+        description: "Lookback window in minutes"
+        default: "20"
+      dry_run:
+        description: "true = classify only, write nothing"
+        default: "false"
+
+concurrency:
+  group: sms-auto-responder
+  cancel-in-progress: false
+
+jobs:
+  respond:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests anthropic python-dotenv
+      - name: Run responder
+        env:
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SMS_RESPONDER_MODEL: claude-sonnet-5-5
+        run: |
+          ARGS="--since-minutes ${{ github.event.inputs.since_minutes || '20' }}"
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python src/sms_auto_responder.py $ARGS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: responder-run-${{ github.run_id }}
+          path: output/auto_responder/
+          retention-days: 14
