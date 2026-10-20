@@ -320,7 +320,7 @@ def run_pm_texts(args) -> int:
     lines = [f"Afternoon texts for {day} ({'LIVE' if live else 'DRY RUN'}): {sum(1 for e in to_send if not e['overflow'])} to send, "
              f"{sum(1 for e in to_send if e['overflow'])} over line cap, {len(skipped)} skipped"]
     for e in to_send:
-        lines.append(f"  {'OVERFLOW' if e['overflow'] else e['line'][-4:]} -> ...{e['to'][-4:]} ({e['tier']}) | {e['street']} | day {e['day']} | vm {e['vm_time']} {e['vm_seconds']}s | {e['message']}")
+        lines.append(f"  {'OVERFLOW' if e['overflow'] else e['line'][-4:]} -> ...{e['to'][-4:]} ({e['tier']}) | {e['street']} | {e['owner_first'] or '(no first name)'} | day {e['day']} | vm {e['vm_time']} {e['vm_seconds']}s")
     sk = Counter(s["why"].split(" (")[0] for s in skipped)
     lines.append("Skipped: " + ", ".join(f"{k} x{v}" for k, v in sk.most_common()))
     results = []
@@ -340,7 +340,7 @@ def run_pm_texts(args) -> int:
     print(report)
     (STATE_DIR / f"plan_{day}.json").write_text(json.dumps({"to_send": to_send, "skipped": skipped, "results": results}, indent=1, default=str), encoding="utf-8")
     if args.slack:
-        _slack(report if len(report) < 3500 else "\n".join(lines[:1] + lines[-3:]))
+        _slack(report)
     return 0
 
 
@@ -436,17 +436,30 @@ def run_audit(args) -> int:
     return 0
 
 
-def _slack(text: str) -> None:
+def _slack(text: str, chunk: int = 3500) -> None:
+    """Post to the webhook, splitting long reports into several messages at line boundaries."""
     url = _env("SLACK_WEBHOOK_URL")
     if not url:
         print("(no SLACK_WEBHOOK_URL; not posted)")
         return
-    req = urllib.request.Request(url, data=json.dumps({"text": text}).encode(), headers={"content-type": "application/json"})
-    try:
-        urllib.request.urlopen(req, timeout=20).read()
-        print("(posted to Slack)")
-    except Exception as e:  # noqa: BLE001
-        print(f"(Slack post failed: {e})")
+    parts, cur = [], ""
+    for line in text.splitlines():
+        if cur and len(cur) + len(line) + 1 > chunk:
+            parts.append(cur)
+            cur = ""
+        cur = (cur + "\n" + line) if cur else line
+    if cur:
+        parts.append(cur)
+    for i, part in enumerate(parts, 1):
+        body = part if len(parts) == 1 else f"({i}/{len(parts)})\n{part}"
+        req = urllib.request.Request(url, data=json.dumps({"text": body}).encode(), headers={"content-type": "application/json"})
+        try:
+            urllib.request.urlopen(req, timeout=20).read()
+        except Exception as e:  # noqa: BLE001
+            print(f"(Slack post failed: {e})")
+            return
+        time.sleep(1)
+    print(f"(posted to Slack in {len(parts)} message(s))")
 
 
 def main() -> int:
