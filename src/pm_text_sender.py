@@ -63,7 +63,8 @@ LEGACY_TAG_PREFIX = "Legacy Recall"
 MAX_PER_LINE = 25
 MIN_VM_SECONDS = 20
 SEND_WINDOW = (16, 18)   # Central hours during which a scheduled --send is allowed
-TERMINAL_MARKS = {"CORRECT", "WRONG", "DEAD", "DNC", "CORRECT_DNC", "WRONG_DNC"}
+TERMINAL_MARKS = {"CORRECT", "WRONG", "DEAD", "DNC", "CORRECT_DNC", "WRONG_DNC"}   # marks that end the afternoon text for a number
+BAD_MARKS = {"WRONG", "DEAD", "DNC", "CORRECT_DNC", "WRONG_DNC"}                    # marks that disqualify a number as the drip's primary phone
 
 TEMPLATES = {
     1: "Hey {first}, it's Britney. Just wanted to make sure you got my voicemail about {street}.",
@@ -94,7 +95,7 @@ def to_ct(ts: str) -> dt.datetime | None:
 
 
 def ct_now() -> dt.datetime:
-    u = dt.datetime.utcnow()
+    u = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
     return (u + _central_offset(u)).replace(tzinfo=dt.timezone(_central_offset(u)))
 
 
@@ -436,6 +437,112 @@ def run_audit(args) -> int:
     return 0
 
 
+# ----------------------------------------------------------------- am start
+PRESET_01_TITLE = "01. New - Set to Prospecting"
+SMS_LINE_TAGS = ("SMS Line A", "SMS Line B", "SMS Line C")
+MAX_NEW_PER_LINE = 25
+
+
+def _preset_must(api: Sift, title_prefix: str) -> dict:
+    rows = api.call("/api/internal/filter-preset/?limit=500")
+    rows = rows.get("results") or rows.get("data") or rows
+    for pz in rows:
+        if str(pz.get("title", "")).startswith(title_prefix):
+            return (pz.get("filters") or {}).get("must") or {}
+    raise RuntimeError(f"preset {title_prefix!r} not found")
+
+
+def _best_primary(phones: dict) -> str | None:
+    for want in ("Dial First", "Dial Second"):
+        for n, ph in phones.items():
+            if ph.get("type") == "MOBILE" and want in (ph.get("tags") or []) and ph.get("status") not in BAD_MARKS:
+                return n
+    return None
+
+
+def plan_am_start(api: Sift) -> tuple[list[dict], list[dict]]:
+    """Records preset 01 would show right now, split into (ready, blocked) with the reason for each block."""
+    must = _preset_must(api, PRESET_01_TITLE)
+    rows = api.search(must)
+    ready, blocked, per_line = [], [], Counter()
+    for row in rows:
+        u = row["uuid"]
+        det = api.call(f"/api/internal/property/{u}/")
+        owner = det.get("owner") or {}
+        phones = {ph["number"]: ph for ph in (owner.get("phones") or [])}
+        lines = [t for t in (det.get("tags") or []) if t in SMS_LINE_TAGS]
+        first = (owner.get("first_name") or "").strip()
+        primary = owner.get("primary_phone")
+        primary_num = str(primary.get("number") if isinstance(primary, dict) else primary or "")
+        primary_num = re.sub(r"\D", "", primary_num)[-10:]
+        e = {"uuid": u, "street": (det.get("address") or {}).get("street") or "", "owner_first": first, "line": lines[0] if len(lines) == 1 else None,
+             "primary": primary_num, "status": det.get("status"), "assigned": det.get("assigned_to")}
+        why = None
+        if det.get("status") == "prospecting":
+            why = "already prospecting"
+        elif not first:
+            why = "owner has no first name (text would read 'Hey ,')"
+        elif len(lines) != 1:
+            why = f"needs exactly one SMS Line tag (has {len(lines)})"
+        elif not primary_num or primary_num not in phones:
+            why = "no primary phone" + (f" (best candidate ...{_best_primary(phones)[-4:]})" if _best_primary(phones) else " and no Dial First/Second mobile")
+        elif phones[primary_num].get("type") != "MOBILE" or phones[primary_num].get("status") in BAD_MARKS:
+            why = f"primary phone is {phones[primary_num].get('type')}/{phones[primary_num].get('status')}"
+        elif det.get("assigned_to") != CALLER_USER_UUID:
+            why = "not assigned to the caller"
+        elif per_line[lines[0]] >= MAX_NEW_PER_LINE:
+            why = f"{lines[0]} already has {MAX_NEW_PER_LINE} new records today"
+        if why:
+            blocked.append({**e, "why": why})
+        else:
+            per_line[lines[0]] += 1
+            ready.append(e)
+    return ready, blocked
+
+
+def run_am_start(args) -> int:
+    live = bool(args.send)
+    if live and not args.force and args.only_between and not _in_window(args.only_between):
+        print(f"Outside window {args.only_between} Central (now {ct_now():%H:%M}); nothing started.")
+        return 0
+    api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
+    ready, blocked = plan_am_start(api)
+    day = ct_now().date().isoformat()
+    lines = [f"Morning start for {day} ({'LIVE' if live else 'DRY RUN'}): {len(ready)} to set Prospecting, {len(blocked)} held back"]
+    for e in ready:
+        lines.append(f"  START {e['street']} | {e['owner_first']} | {e['line']} | primary ...{e['primary'][-4:]}")
+    for e in blocked:
+        lines.append(f"  HOLD  {e['street']} | {e['owner_first'] or '(no name)'} | {e['why']}")
+    results = []
+    if live and ready:
+        for e in ready:
+            try:
+                api.call(f"/api/internal/property/{e['uuid']}/status/", "POST", {"status": "prospecting"})
+                results.append({**e, "ok": True})
+            except RuntimeError as ex:
+                results.append({**e, "ok": False, "err": str(ex)[:200]})
+        time.sleep(90)
+        no_drip = []
+        for r in results:
+            if not r["ok"]:
+                continue
+            h = api.call(f"/api/internal/drip-campaign-history/by-property/?property_uuid={r['uuid']}")
+            running = [x for x in (h.get("results") or []) if x.get("status") == "running"]
+            r["running_drips"] = len(running)
+            if len(running) != 1:
+                no_drip.append(f"{r['street']} ({len(running)} running)")
+        fails = [r for r in results if not r["ok"]]
+        lines.append(f"Set Prospecting on {len(results) - len(fails)}; failed {len(fails)}" + "".join(f"\n  FAILED {r['street']}: {r['err']}" for r in fails))
+        lines.append(":white_check_mark: every started record has exactly one running drip" if not no_drip else ":warning: drip check: " + "; ".join(no_drip))
+    report = "\n".join(lines)
+    print(report)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    (STATE_DIR / f"am_start_{day}.json").write_text(json.dumps({"ready": ready, "blocked": blocked, "results": results}, indent=1, default=str), encoding="utf-8")
+    if args.slack:
+        _slack(report)
+    return 0
+
+
 def _slack(text: str, chunk: int = 3500) -> None:
     """Post to the webhook, splitting long reports into several messages at line boundaries."""
     url = _env("SLACK_WEBHOOK_URL")
@@ -477,6 +584,12 @@ def main() -> int:
     a.add_argument("--slack", action="store_true")
     a.add_argument("--only-between", help="Central window like 19:00-20:00; outside it the run does nothing")
     a.set_defaults(fn=run_audit)
+    m = sub.add_parser("am-start", help="set preset-01 records to Prospecting (starts the morning drip)")
+    m.add_argument("--send", action="store_true", help="actually change statuses (default is dry run)")
+    m.add_argument("--force", action="store_true")
+    m.add_argument("--slack", action="store_true")
+    m.add_argument("--only-between", help="Central window like 09:50-12:00")
+    m.set_defaults(fn=run_am_start)
     args = ap.parse_args()
     return args.fn(args)
 
