@@ -1,0 +1,41 @@
+name: Drip Exit Guard
+
+# Stops DataSift drip-campaign texts for any Priority 1 record whose status
+# has left `prospecting` (New Lead, Not Interested, Dead Lead, DNC, ...).
+# DataSift has no sequence action for this and does not stop a drip on a
+# status change (both confirmed live 2026-10-16) — see
+# src/drip_exit_guard.py for the full reasoning.
+#
+# Schedule: every 15 minutes, 13:00-01:45 UTC = 8:00 AM - 8:45 PM
+# America/Chicago (CDT, UTC-5), Monday-Friday plus the UTC spill-over into
+# Saturday for the late-evening Friday slots. DataSift only sends drips
+# 8 AM - 9 PM, so this covers the whole sending window. GitHub may run
+# scheduled jobs late under load (observed up to several hours on the
+# stage2 workflow) — Rahaf's brief keeps the manual "remove from campaign"
+# step as the fallback for anything that slips through.
+
+on:
+  schedule:
+    - cron: '*/15 13-23 * * 1-5'
+    - cron: '*/15 0-1 * * 2-6'
+  workflow_dispatch: {}
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Remove non-prospecting records from running drips
+        env:
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          DRIP_GUARD_TAGS: "Priority 1"
+        run: python src/drip_exit_guard.py
