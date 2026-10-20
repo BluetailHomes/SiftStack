@@ -231,8 +231,19 @@ def tier(m: dict, number: str) -> str:
 
 
 def final_mark(m: dict, number: str, caller: str) -> str | None:
+    """The mark in effect on `number` at the end of the day.
+
+    A mark made today by the caller wins. Otherwise the phone's stored status
+    counts, because a number marked No Answer yesterday stays No Answer today:
+    the smrtPhone pop-up writes the mark once, and clicking the same icon again
+    in Sift would clear it (Rahaf, 2026-10-20). Only an UNKNOWN/blank status
+    means the number was never marked.
+    """
     marks = [x for x in m["marks"] if x["phone"] == number and x["by"] == caller]
-    return marks[-1]["to"] if marks else None
+    if marks:
+        return marks[-1]["to"]
+    cur = (m["phones"].get(number) or {}).get("status")
+    return cur if cur and cur != "UNKNOWN" else None
 
 
 # ----------------------------------------------------------------- pm texts
