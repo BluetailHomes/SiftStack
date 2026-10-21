@@ -17,7 +17,10 @@ Interested, the drip would keep texting them. This guard closes that gap.
 What it does
 ------------
 1. Search records that are (a) in one of the drip-triggering tags and
-   (b) in any status other than `prospecting` / no status.
+   (b) in any status other than `prospecting` / no status, plus (c) records
+   flagged DNC/opt-out and (d) prospecting records whose PRIMARY phone is
+   marked Wrong/Dead (the drip texts the primary phone; a not-the-owner
+   reply leaves status at prospecting, so (a)/(b) never catch it).
 2. For each, read its drip history (`/drip-campaign-history/by-property/`).
 3. DELETE every history row that is still `running`. Deleting the row is
    what the UI's "Remove from campaign" does; verified live 2026-10-16.
@@ -112,6 +115,25 @@ def search_records(key: str, must: dict, limit: int = 200) -> list[dict]:
         offset += limit
 
 
+WRONG_PHONE_STATUSES = {"WRONG", "DEAD", "WRONG_DNC"}
+
+
+def _digits(n: str | None) -> str:
+    return "".join(ch for ch in (n or "") if ch.isdigit())[-10:]
+
+
+def primary_phone_is_wrong(key: str, property_uuid: str) -> bool:
+    d = _get(key, f"/api/internal/property/{property_uuid}/")
+    own = d.get("owner") or {}
+    primary = _digits(own.get("primary_phone"))
+    if not primary:
+        return False
+    for p in own.get("phones") or []:
+        if _digits(p.get("number")) == primary:
+            return (p.get("status") or "") in WRONG_PHONE_STATUSES
+    return False
+
+
 def running_drips(key: str, property_uuid: str) -> list[dict]:
     d = _get(key, f"/api/internal/drip-campaign-history/by-property/?property_uuid={property_uuid}")
     return [h for h in (d.get("results") or []) if h.get("status") == "running"]
@@ -160,8 +182,30 @@ def run(key: str, tags: list[str], dry_run: bool) -> dict:
                     rows.append(r)
         except Exception as e:  # noqa: BLE001
             LOG.warning("opt-out search failed for %s: %s", extra, e)
+    # Primary phone marked WRONG/DEAD while the record is still prospecting: the drip texts the
+    # primary phone, so it would keep texting a number a human (or the auto-responder's draft)
+    # already said is not the owner. Search rows do not carry phone statuses reliably, so each
+    # candidate's full record is read over GET; only prospecting records are checked, so this is
+    # the active batch, not the whole tag. Added 2026-10-21.
+    try:
+        wrong = search_records(key, {"any_tags": tuuids, "any_property_status": ["prospecting"],
+                                     "any_phone_status": sorted(WRONG_PHONE_STATUSES)})
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("wrong-phone search failed: %s", e)
+        wrong = []
+    for r in wrong:
+        if r["uuid"] in seen:
+            continue
+        try:
+            if primary_phone_is_wrong(key, r["uuid"]):
+                seen.add(r["uuid"])
+                r["_reason"] = "primary phone wrong/dead"
+                rows.append(r)
+        except Exception as e:  # noqa: BLE001
+            LOG.warning("primary-phone check failed for %s: %s", r["uuid"], e)
+        time.sleep(0.2)
     stats["candidates"] = len(rows)
-    LOG.info("%d candidates after adding DNC/opt-out records", len(rows))
+    LOG.info("%d candidates after adding DNC/opt-out and wrong-primary-phone records", len(rows))
 
     for r in rows:
         pu = r["uuid"]
@@ -189,9 +233,53 @@ def run(key: str, tags: list[str], dry_run: bool) -> dict:
     return stats
 
 
+def mark_phone_wrong(key: str, property_uuid: str, number: str) -> bool:
+    """Set one phone on the record's owner to WRONG via the UI's own upsert call
+    (PATCH /owner/ ignores status; see memory note datasift-owner-phone-write-api)."""
+    d = _get(key, f"/api/internal/property/{property_uuid}/")
+    own = d.get("owner") or {}
+    ph = next((p for p in own.get("phones") or [] if _digits(p.get("number")) == _digits(number)), None)
+    if not ph:
+        LOG.error("phone %s not on record %s", number, property_uuid)
+        return False
+    tags = [t.get("title", t) if isinstance(t, dict) else t for t in ph.get("tags") or []]
+    body = {"phones": [{"number": ph["number"], "type": ph.get("type") or "UNKNOWN", "tags": tags, "status": "WRONG",
+                        "is_connected": ph.get("is_connected", True), "verified": ph.get("verified", False)}]}
+    r = requests.post(API + f"/api/internal/owner/{own['uuid']}/upsert-phones/", headers=_headers(key), json=body, timeout=30)
+    LOG.info("upsert-phones %s -> WRONG: HTTP %s", number, r.status_code)
+    return r.status_code in (200, 201)
+
+
+def run_one(key: str, property_uuid: str, mark_wrong: str | None, note: str | None, dry_run: bool) -> dict:
+    """Pull one record from every running drip, optionally marking a phone WRONG and leaving a note."""
+    stats = {"candidates": 1, "with_running_drip": 0, "removed": 0, "failed": 0}
+    if mark_wrong and not dry_run and not mark_phone_wrong(key, property_uuid, mark_wrong):
+        stats["failed"] += 1
+    drips = running_drips(key, property_uuid)
+    stats["with_running_drip"] = 1 if drips else 0
+    for h in drips:
+        label = f"{h.get('name')} / next={h.get('next_step')} in {h.get('next_in')}"
+        if dry_run:
+            LOG.info("DRY RUN would remove %s from drip (%s)", property_uuid, label)
+        elif remove_history(key, h["history_uuid"]):
+            stats["removed"] += 1
+            LOG.info("Removed %s from drip (%s)", property_uuid, label)
+        else:
+            stats["failed"] += 1
+            LOG.error("Failed to remove %s (%s)", property_uuid, label)
+    if note and not dry_run:
+        r = requests.post(API + f"/api/internal/property/{property_uuid}/message/", headers=_headers(key),
+                          json={"message": note}, timeout=30)
+        LOG.info("note posted: HTTP %s", r.status_code)
+    return stats
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--dry-run", action="store_true", help="report only, delete nothing")
+    ap.add_argument("--property", help="one record uuid: remove it from every running drip, ignoring status")
+    ap.add_argument("--mark-wrong", help="with --property: also set this phone number to WRONG")
+    ap.add_argument("--note", help="with --property: message-board note to leave on the record")
     ap.add_argument("--tags", default=os.environ.get("DRIP_GUARD_TAGS", "Priority 1"),
                     help="comma-separated tag titles to guard (default: Priority 1)")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -202,6 +290,10 @@ def main() -> int:
     if not key:
         LOG.error("REISIFT_API_KEY is not set")
         return 2
+    if a.property:
+        stats = run_one(key, a.property, a.mark_wrong, a.note, a.dry_run)
+        LOG.info("Done: %s", stats)
+        return 1 if stats["failed"] else 0
     tags = [t.strip() for t in a.tags.split(",") if t.strip()]
     stats = run(key, tags, a.dry_run)
     LOG.info("Done: %s", stats)

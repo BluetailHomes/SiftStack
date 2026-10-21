@@ -57,6 +57,12 @@ CATEGORIES_SAFE = {
 CATEGORIES_HUMAN = {"call_me", "price_question", "interest", "probate_death", "already_sold", "unclear"}
 ALL_CATEGORIES = CATEGORIES_SAFE | CATEGORIES_HUMAN
 
+# Categories after which the morning drip must not text this number again. Applied even in draft
+# mode: removing a record from a drip is bookkeeping, not a reply, and the drip exit guard only
+# reacts to a status change, which none of these propose. Added 2026-10-21 after a non-owner on a
+# primary phone said "quit texting me" and stayed queued for the next morning's text.
+CATEGORIES_STOP_DRIP = {"stop", "wrong_number", "not_owner", "tenant", "owner_not_selling"}
+
 STATUS_MAP = {  # rulebook wording -> DataSift status key
     "Not Interested": "not_interested",
     "New Lead": "new_lead",
@@ -99,6 +105,14 @@ class DataSift:
 
     def post_message(self, uuid: str, text: str) -> bool:
         return self._req("POST", f"{BASE}/property/{uuid}/message/", json={"message": text}).status_code in (200, 201)
+
+    def running_drips(self, uuid: str) -> list[dict]:
+        d = self.get("/drip-campaign-history/by-property/", property_uuid=uuid)
+        return [h for h in (d.get("results") or []) if h.get("status") == "running"]
+
+    def remove_drip(self, history_uuid: str) -> bool:
+        """Same DELETE the UI's "Remove from campaign" sends (verified live 2026-10-16)."""
+        return self._req("DELETE", f"{BASE}/drip-campaign-history/{history_uuid}/").status_code in (200, 204)
 
     def feed(self, since: dt.datetime, max_pages: int = 30) -> list[dict]:
         """Account-wide log feed, newest first, cursor-paginated. Returns inbound SMS events since `since`."""
@@ -316,12 +330,41 @@ def handle(ds: DataSift, rules: str, ev: dict, mode: str, dry_run: bool, model: 
             f"{'; note: ' + out['note'] if out.get('note') else ''}\nWhy: {out.get('reason', '')}")
     if mode == "auto":
         raise NotImplementedError("auto mode needs the send-SMS call wired; run in draft mode")
+    drip_line = stop_drip_if_needed(ds, pu, out, ctx["record"]["inbound_is_primary"])
+    if drip_line:
+        note += "\n" + drip_line
+        result["drip"] = drip_line
     ds.post_message(pu, note)
     slack(f"*Auto-reply draft* {d['address'].get('street')} — {out['category']}"
           f"{' — needs a human' if out.get('needs_human') else ''}\n"
           f"> {ctx['inbound_text']}\nSuggested: {out.get('reply') or '(none)'}\n"
+          f"{drip_line + chr(10) if drip_line else ''}"
           f"https://app.reisift.io/records/properties/{pu}/details", needs_human=bool(out.get("needs_human")))
     return result
+
+
+def stop_drip_if_needed(ds: DataSift, prop_uuid: str, out: dict, inbound_is_primary: bool) -> str:
+    """Remove the record from any running drip when this inbound means the number we drip must not
+    be texted again. The drip texts the primary phone, so a non-primary inbound only counts for a
+    STOP (a legal must-stop pulls every automation). Returns a one-line summary, or "" if untouched."""
+    cat = out.get("category")
+    wants_stop = cat == "stop" or (inbound_is_primary and (cat in CATEGORIES_STOP_DRIP
+                                                            or out.get("phone_status") in ("WRONG", "DNC")))
+    if not wants_stop:
+        return ""
+    try:
+        drips = ds.running_drips(prop_uuid)
+    except Exception as e:  # noqa: BLE001
+        log.warning("drip history read failed for %s: %s", prop_uuid, e)
+        return "Drip: could not read drip history, check by hand"
+    if not drips:
+        return ""
+    names = []
+    for h in drips:
+        ok = ds.remove_drip(h["history_uuid"])
+        names.append(f"{h.get('name')}{'' if ok else ' (REMOVE FAILED)'}")
+        log.info("%s drip %s for %s (%s)", "removed" if ok else "FAILED to remove", h.get("name"), prop_uuid, cat)
+    return f"Drip: removed from {', '.join(names)} ({cat})"
 
 
 def main() -> int:
