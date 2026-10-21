@@ -1,9 +1,11 @@
 """Drip-stop rules added 2026-10-21: the auto-responder pulls a record from its running drip when
-the inbound means the dripped (primary) number must not be texted again, and the drip exit guard
+the dripped (primary) number replies at all, or anyone texts STOP, and the drip exit guard
 pulls prospecting records whose primary phone is marked Wrong/Dead."""
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -40,9 +42,17 @@ def test_stop_from_any_number_removes_drip():
     ds.remove_drip.assert_called_once()
 
 
-def test_who_is_this_leaves_drip():
+@pytest.mark.parametrize("cat", ["who_is_this", "interest", "price_question", "call_me", "unclear"])
+def test_any_reply_from_primary_removes_drip(cat):
     ds = _ds(DRIP)
-    assert r.stop_drip_if_needed(ds, "p1", {"category": "who_is_this", "phone_status": "leave"}, inbound_is_primary=True) == ""
+    line = r.stop_drip_if_needed(ds, "p1", {"category": cat, "phone_status": "leave"}, inbound_is_primary=True)
+    ds.remove_drip.assert_called_once_with("h1")
+    assert cat in line
+
+
+def test_question_from_secondary_number_leaves_drip():
+    ds = _ds(DRIP)
+    assert r.stop_drip_if_needed(ds, "p1", {"category": "who_is_this", "phone_status": "leave"}, inbound_is_primary=False) == ""
     ds.running_drips.assert_not_called()
 
 

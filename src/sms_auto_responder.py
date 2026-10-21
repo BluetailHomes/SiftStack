@@ -57,11 +57,11 @@ CATEGORIES_SAFE = {
 CATEGORIES_HUMAN = {"call_me", "price_question", "interest", "probate_death", "already_sold", "unclear"}
 ALL_CATEGORIES = CATEGORIES_SAFE | CATEGORIES_HUMAN
 
-# Categories after which the morning drip must not text this number again. Applied even in draft
-# mode: removing a record from a drip is bookkeeping, not a reply, and the drip exit guard only
-# reacts to a status change, which none of these propose. Added 2026-10-21 after a non-owner on a
-# primary phone said "quit texting me" and stayed queued for the next morning's text.
-CATEGORIES_STOP_DRIP = {"stop", "wrong_number", "not_owner", "tenant", "owner_not_selling"}
+# Drip stop (stop_drip_if_needed): any reply from the dripped primary phone, or a STOP from any
+# number, pulls the record from its running drip. Applied even in draft mode: removing a record
+# from a drip is bookkeeping, not a reply. Added 2026-10-21 for stop-type categories after a
+# non-owner said "quit texting me" and stayed queued; widened the same day to every category,
+# because a seller who has replied should hear from Rahaf, not from tomorrow's automated text.
 
 STATUS_MAP = {  # rulebook wording -> DataSift status key
     "Not Interested": "not_interested",
@@ -344,12 +344,13 @@ def handle(ds: DataSift, rules: str, ev: dict, mode: str, dry_run: bool, model: 
 
 
 def stop_drip_if_needed(ds: DataSift, prop_uuid: str, out: dict, inbound_is_primary: bool) -> str:
-    """Remove the record from any running drip when this inbound means the number we drip must not
-    be texted again. The drip texts the primary phone, so a non-primary inbound only counts for a
-    STOP (a legal must-stop pulls every automation). Returns a one-line summary, or "" if untouched."""
+    """Remove the record from any running drip when the inbound comes from the number we drip.
+    The drip texts the primary phone, so ANY reply from it (whatever the category: a question, an
+    interested owner, a not-the-owner) ends the automated morning texts; a human takes it from
+    there. A non-primary inbound only counts for a STOP (a legal must-stop pulls every automation).
+    Returns a one-line summary, or "" if untouched."""
     cat = out.get("category")
-    wants_stop = cat == "stop" or (inbound_is_primary and (cat in CATEGORIES_STOP_DRIP
-                                                            or out.get("phone_status") in ("WRONG", "DNC")))
+    wants_stop = cat == "stop" or inbound_is_primary
     if not wants_stop:
         return ""
     try:

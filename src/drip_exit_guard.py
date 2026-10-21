@@ -26,7 +26,11 @@ What it does
    what the UI's "Remove from campaign" does; verified live 2026-10-16.
 
 Everything is idempotent and read-before-write; a record with no running
-drip costs one GET. Run it every 15 minutes during texting hours.
+drip costs one GET. It runs as the second step of the SMS auto-responder
+job (.github/workflows/sms-auto-responder.yml), which the Cloudflare Worker in
+dispatcher/ starts every 5 minutes, 7:00 AM-10:55 PM Central. Its own GitHub
+cron (drip-exit-guard.yml, every 15 minutes) stays as a fallback; GitHub often
+runs that hours late, and running twice is harmless.
 
 Usage
 -----
