@@ -22,13 +22,13 @@ GITHUB_REF = "main"
 # and a CST entry; src/index.js converts "now" to America/Chicago and only fires
 # when the Central clock actually reads the slot (see JOBS there).
 [triggers]
+# One cron per job, listing both possible UTC hours (CDT and CST) because the
+# Workers Free plan allows only 5 cron triggers per account. src/index.js checks
+# the Central clock and the wrong-hour firing is a no-op.
 crons = [
-  "50 14 * * 1-5",  # 09:50 CDT  am-start
-  "50 15 * * 1-5",  # 09:50 CST  am-start
-  "30 21 * * 1-5",  # 16:30 CDT  pm-texts
-  "30 22 * * 1-5",  # 16:30 CST  pm-texts
-  "15 0 * * 2-6",   # 19:15 CDT  audit
-  "15 1 * * 2-6",   # 19:15 CST  audit
+  "50 14,15 * * 1-5",  # 09:50 Central am-start (14:50 UTC in CDT, 15:50 UTC in CST)
+  "30 21,22 * * 1-5",  # 16:30 Central pm-texts
+  "15 0,1 * * 2-6",    # 19:15 Central audit (next UTC day, hence Tue-Sat)
 ]
 
 [observability]
