@@ -12,7 +12,7 @@ const JOBS = [
   // Inbound-text responder: poll every 5 minutes while sellers can be replying (the drip can
   // send until ~11 PM Central). 180-minute lookback so a missed poll never loses a reply.
   { mode: "sms-responder", everyMinutes: 5, fromHour: 7, toHour: 23, daily: true,
-    workflow: "sms-auto-responder.yml", inputs: { since_minutes: "180" } },
+    workflow: "sms-auto-responder.yml", inputs: { since_minutes: "30" } },
 ];
 const TOLERANCE_MIN = 5;
 const WEEKDAYS = new Set(["Mon", "Tue", "Wed", "Thu", "Fri"]);
