@@ -1,0 +1,35 @@
+# SiftStack dispatcher - a Cloudflare Worker that fires the GitHub Actions jobs in
+# .github/workflows/pm-text-sender.yml at the exact minute, via workflow_dispatch.
+#
+# Why: GitHub's own `schedule:` crons are the lowest-priority queue and ran ~4 hours
+# late on 2026-10-20 (0 of 35 afternoon texts sent). workflow_dispatch runs start
+# within seconds. Cloudflare cron triggers fire on the minute.
+#
+# Deploy (from this folder):   npx wrangler deploy
+# Secrets:                     npx wrangler secret put GITHUB_TOKEN      (fine-grained PAT, Actions: read+write on BluetailHomes/SiftStack)
+#                              npx wrangler secret put SLACK_WEBHOOK_URL (optional, failure alerts)
+# Logs:                        npx wrangler tail
+name = "siftstack-dispatcher"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+GITHUB_REPO = "BluetailHomes/SiftStack"
+WORKFLOW_FILE = "pm-text-sender.yml"
+GITHUB_REF = "main"
+
+# Cloudflare cron is UTC and has no time zone, so each Central-time slot has a CDT
+# and a CST entry; src/index.js converts "now" to America/Chicago and only fires
+# when the Central clock actually reads the slot (see JOBS there).
+[triggers]
+crons = [
+  "50 14 * * 1-5",  # 09:50 CDT  am-start
+  "50 15 * * 1-5",  # 09:50 CST  am-start
+  "30 21 * * 1-5",  # 16:30 CDT  pm-texts
+  "30 22 * * 1-5",  # 16:30 CST  pm-texts
+  "15 0 * * 2-6",   # 19:15 CDT  audit
+  "15 1 * * 2-6",   # 19:15 CST  audit
+]
+
+[observability]
+enabled = true

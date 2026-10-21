@@ -10,17 +10,27 @@ name: PM Text Sender + Caller Audit
 #   audit     7:15 PM Central, Mon-Fri. Posts the end-of-day caller checklist
 #             (unmarked numbers, line caps, missed callbacks, legacy tagging) to Slack.
 #
-# GitHub cron is UTC and has no time zone, so each job has two crons (CDT and
-# CST) and the script's --only-between gate makes the wrong one a no-op.
-# GitHub can also start scheduled jobs late under load; a pm-texts run that
-# lands after 17:00 Central does nothing rather than texting at dinner time.
+# HOW THESE GET TRIGGERED (changed 2026-10-20): GitHub's own `schedule:` crons
+# ran ~4 hours late on the first live day and pm-texts missed its window
+# entirely, so the PRIMARY trigger for all three jobs is now the Cloudflare
+# Worker in dispatcher/ (siftstack-dispatcher), which calls workflow_dispatch at
+# the exact Central minute with mode=<job> and gate=true. gate=true applies the
+# same --only-between window the schedule path uses, so even a queued dispatch
+# can never text at dinner time.
+#
+# Fallbacks: am-start and audit keep their `schedule:` crons below (GitHub cron
+# is UTC and has no time zone, so each has a CDT and a CST entry; the window
+# gate makes the wrong one, or a late one, a no-op - both jobs are harmless to
+# run twice). pm-texts has NO schedule cron and must never get one back: the
+# "already texted today" check depends on DataSift logging API-sent SMS, which
+# is unverified, so its only backup is the Windows task on Kaycie's machine
+# ("SiftStack PM Texts", scripts/pm_texts_local.cmd) in a non-overlapping
+# 17:00-17:45 Central slot.
 
 on:
   schedule:
     - cron: '50 14 * * 1-5'   # 09:50 CDT  (am-start)
     - cron: '50 15 * * 1-5'   # 09:50 CST  (am-start)
-    - cron: '30 21 * * 1-5'   # 16:30 CDT  (pm-texts)
-    - cron: '30 22 * * 1-5'   # 16:30 CST  (pm-texts)
     - cron: '15 0 * * 2-6'    # 19:15 CDT  (audit)
     - cron: '15 1 * * 2-6'    # 19:15 CST  (audit)
   workflow_dispatch:
@@ -33,6 +43,10 @@ on:
       day:
         description: Optional YYYY-MM-DD to backtest (always a dry run)
         required: false
+      gate:
+        description: Apply the job's Central time window (the Cloudflare dispatcher sets this; leave off for a manual run)
+        type: boolean
+        default: false
 
 jobs:
   am-start:
@@ -57,7 +71,7 @@ jobs:
         run: |
           ARGS="am-start --slack"
           if [ "$LIVE" = "true" ]; then ARGS="$ARGS --send"; fi
-          if [ "${{ github.event_name }}" = "schedule" ]; then ARGS="$ARGS --only-between 09:40-12:00"; fi
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 09:40-12:00"; fi
           python src/pm_text_sender.py $ARGS
       - uses: actions/upload-artifact@v4
         if: always()
@@ -67,9 +81,7 @@ jobs:
           if-no-files-found: ignore
 
   pm-texts:
-    if: >-
-      github.event.schedule == '30 21 * * 1-5' || github.event.schedule == '30 22 * * 1-5'
-      || (github.event_name == 'workflow_dispatch' && inputs.mode == 'pm-texts')
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'pm-texts'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -88,7 +100,7 @@ jobs:
           ARGS="pm-texts --slack"
           if [ "$LIVE" = "true" ] && [ -z "$DAY" ]; then ARGS="$ARGS --send"; fi
           if [ -n "$DAY" ]; then ARGS="$ARGS --day $DAY"; fi
-          if [ "${{ github.event_name }}" = "schedule" ]; then ARGS="$ARGS --only-between 16:15-17:00"; fi
+          if [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 16:15-17:00"; fi
           echo "python src/pm_text_sender.py $ARGS"
           python src/pm_text_sender.py $ARGS
       - uses: actions/upload-artifact@v4
@@ -117,7 +129,7 @@ jobs:
         run: |
           ARGS="audit --slack"
           if [ -n "$DAY" ]; then ARGS="$ARGS --day $DAY"; fi
-          if [ "${{ github.event_name }}" = "schedule" ]; then ARGS="$ARGS --only-between 19:00-20:00"; fi
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 19:00-20:00"; fi
           python src/pm_text_sender.py $ARGS
       - uses: actions/upload-artifact@v4
         if: always()

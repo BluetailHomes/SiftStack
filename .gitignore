@@ -70,3 +70,6 @@ autoresearch/
 /probate-market-research.md
 tests/diag_*.png
 tests/diag_output/
+
+# Cloudflare wrangler local state (dispatcher/)
+.wrangler/
