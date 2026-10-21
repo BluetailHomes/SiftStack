@@ -269,6 +269,11 @@ def plan_pm_texts(models: list[dict], day: str, caller: str, already_sent: set[s
                 why = f"number now {(m['phones'].get(n) or {}).get('status')}"
             elif m["owner_dnc"] or m["owner_opt_out"]:
                 why = "owner flagged DNC/opt-out"
+            elif (m["phones"].get(n) or {}).get("type") not in (None, "", "MOBILE"):
+                # smrtPhone rejects a text to a landline/VoIP line with HTTP 400 (2 a day on
+                # 2026-10-21, both confirmed non-mobile by Trestle). A number with no type on
+                # the record still gets tried.
+                why = f"number is {(m['phones'].get(n) or {}).get('type')}, not mobile (can't take a text)"
             elif m["status"] != "prospecting":
                 why = f"record status is {m['status']!r}, not prospecting"
             elif any(s["from"] == n for s in m["sms_in"]) or any(x["dir"] == "inbound" and x["from"] == n for x in m["calls"]):
