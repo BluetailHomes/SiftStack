@@ -73,13 +73,19 @@ def _headers(key: str, override_get: bool = False) -> dict:
     return h
 
 
-def _get(key: str, path: str, retries: int = 4) -> dict | list:
+def _get(key: str, path: str, retries: int = 6) -> dict | list:
+    # 429s got more common once the guard started running every 5 minutes next to
+    # the responder (2026-10-21): back off longer and honor Retry-After when sent.
     for attempt in range(retries):
         r = requests.get(API + path, headers=_headers(key), timeout=30)
         if r.status_code == 200:
             return r.json()
         if r.status_code == 429:
-            time.sleep(3 * (attempt + 1))
+            try:
+                wait = float(r.headers.get("Retry-After", ""))
+            except ValueError:
+                wait = 5 * (attempt + 1)
+            time.sleep(min(max(wait, 1), 60))
             continue
         r.raise_for_status()
     raise RuntimeError(f"GET {path} kept failing")
@@ -153,7 +159,7 @@ def remove_history(key: str, history_uuid: str) -> bool:
 
 
 def run(key: str, tags: list[str], dry_run: bool) -> dict:
-    stats = {"candidates": 0, "with_running_drip": 0, "removed": 0, "failed": 0}
+    stats = {"candidates": 0, "with_running_drip": 0, "removed": 0, "failed": 0, "unread": 0}
     tuuids = tag_uuids(key, tags)
     if not tuuids:
         LOG.error("No guard tags resolved; nothing to do.")
@@ -216,8 +222,10 @@ def run(key: str, tags: list[str], dry_run: bool) -> dict:
         try:
             drips = running_drips(key, pu)
         except Exception as e:  # noqa: BLE001
-            LOG.warning("history read failed for %s: %s", pu, e)
-            stats["failed"] += 1
+            # Not a failure: nothing was changed, and the next run (5 minutes later)
+            # checks this record again. Only a failed removal fails the job.
+            LOG.warning("history read failed for %s (retried next run): %s", pu, e)
+            stats["unread"] += 1
             continue
         if not drips:
             continue
