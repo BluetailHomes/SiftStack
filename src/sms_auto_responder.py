@@ -114,6 +114,15 @@ class DataSift:
         """Same DELETE the UI's "Remove from campaign" sends (verified live 2026-10-16)."""
         return self._req("DELETE", f"{BASE}/drip-campaign-history/{history_uuid}/").status_code in (200, 204)
 
+    def set_phone_status(self, owner_uuid: str, phone: dict, status: str) -> bool:
+        """Set one phone's status with the UI's own upsert call; only the phone listed is touched
+        (PATCH /owner/ ignores status; same call as drip_exit_guard.mark_phone_wrong)."""
+        tags = [t.get("title", t) if isinstance(t, dict) else t for t in phone.get("tags") or []]
+        body = {"phones": [{"number": phone["number"], "type": phone.get("type") or "UNKNOWN", "tags": tags,
+                            "status": status, "is_connected": phone.get("is_connected", True),
+                            "verified": phone.get("verified", False)}]}
+        return self._req("POST", f"{BASE}/owner/{owner_uuid}/upsert-phones/", json=body).status_code in (200, 201)
+
     def feed(self, since: dt.datetime, max_pages: int = 30) -> list[dict]:
         """Account-wide log feed, newest first, cursor-paginated. Returns inbound SMS events since `since`."""
         out, cursor = [], None
@@ -256,12 +265,15 @@ def classify(rules: str, ctx: dict, model: str) -> dict | None:
     return out
 
 
-def slack(text: str, needs_human: bool = False) -> None:
+def slack(text: str, needs_human: bool = False, google_chat: bool = True) -> None:
     """Post to the chat webhooks. Slack gets every draft; Google Chat (Rahaf's space) gets only the
-    drafts flagged needs-a-human, unless GOOGLE_CHAT_ALL=true."""
+    drafts flagged needs-a-human, unless GOOGLE_CHAT_ALL=true. google_chat=False keeps a post out of
+    Google Chat entirely (STOPs, Kaycie's call 2026-10-21: the number is DNC'd automatically)."""
     for name, env in (("Slack", "SLACK_WEBHOOK_URL"), ("Google Chat", "GOOGLE_CHAT_WEBHOOK_URL")):
         url = os.environ.get(env)
         if not url:
+            continue
+        if env == "GOOGLE_CHAT_WEBHOOK_URL" and not google_chat:
             continue
         if env == "GOOGLE_CHAT_WEBHOOK_URL" and not needs_human and os.environ.get("GOOGLE_CHAT_ALL", "").lower() != "true":
             continue
@@ -330,6 +342,10 @@ def handle(ds: DataSift, rules: str, ev: dict, mode: str, dry_run: bool, model: 
             f"{'; note: ' + out['note'] if out.get('note') else ''}\nWhy: {out.get('reason', '')}")
     if mode == "auto":
         raise NotImplementedError("auto mode needs the send-SMS call wired; run in draft mode")
+    dnc_line = mark_number_dnc_if_stop(ds, own, inbound_number, out)
+    if dnc_line:
+        note += "\n" + dnc_line
+        result["dnc"] = dnc_line
     drip_line = stop_drip_if_needed(ds, pu, out, ctx["record"]["inbound_is_primary"])
     if drip_line:
         note += "\n" + drip_line
@@ -338,20 +354,48 @@ def handle(ds: DataSift, rules: str, ev: dict, mode: str, dry_run: bool, model: 
     slack(f"*Auto-reply draft* {d['address'].get('street')} — {out['category']}"
           f"{' — needs a human' if out.get('needs_human') else ''}\n"
           f"> {ctx['inbound_text']}\nSuggested: {out.get('reply') or '(none)'}\n"
+          f"{dnc_line + chr(10) if dnc_line else ''}"
           f"{drip_line + chr(10) if drip_line else ''}"
-          f"https://app.reisift.io/records/properties/{pu}/details", needs_human=bool(out.get("needs_human")))
+          f"https://app.reisift.io/records/properties/{pu}/details", needs_human=bool(out.get("needs_human")),
+          google_chat=out.get("category") != "stop")
     return result
+
+
+DNC_STATUSES = {"CORRECT_DNC", "WRONG_DNC"}
+
+
+def mark_number_dnc_if_stop(ds: DataSift, owner: dict, number: str, out: dict) -> str:
+    """On a STOP, mark just the texting number DNC (applied even in draft mode, like the drip stop):
+    WRONG_DNC if it was already marked Wrong/Dead, else CORRECT_DNC. Other phones, the record status,
+    lists and the owner's dnc/opt-out flags are left alone, so the property stays in marketing.
+    Returns a one-line summary, or "" if untouched."""
+    if out.get("category") != "stop":
+        return ""
+    ph = next((p for p in owner.get("phones") or [] if digits(p.get("number")) == number), None)
+    if not ph or not owner.get("uuid"):
+        return f"DNC: {number} is not on this record's phone list, mark it by hand"
+    old = ph.get("status") or "UNKNOWN"
+    if old in DNC_STATUSES:
+        return ""
+    new = "WRONG_DNC" if old in ("WRONG", "DEAD") else "CORRECT_DNC"
+    try:
+        ok = ds.set_phone_status(owner["uuid"], ph, new)
+    except Exception as e:  # noqa: BLE001
+        log.warning("DNC write failed for %s: %s", number, e)
+        ok = False
+    log.info("%s %s %s -> %s", "marked" if ok else "FAILED to mark", number, old, new)
+    return f"DNC: phone {number[-4:]} {old} -> {new}" if ok else f"DNC: FAILED to mark {number} {new}, mark it by hand"
 
 
 def stop_drip_if_needed(ds: DataSift, prop_uuid: str, out: dict, inbound_is_primary: bool) -> str:
     """Remove the record from any running drip when the inbound comes from the number we drip.
-    The drip texts the primary phone, so ANY reply from it (whatever the category: a question, an
-    interested owner, a not-the-owner) ends the automated morning texts; a human takes it from
-    there. A non-primary inbound only counts for a STOP (a legal must-stop pulls every automation).
+    The drip texts only the primary phone, so ANY reply from it (whatever the category: a question,
+    an interested owner, a not-the-owner, a STOP) ends the automated morning texts; a human takes it
+    from there. A reply from any other number, STOP included, leaves the drip running: that number
+    was never being texted, and a STOP from it only gets that number marked DNC.
     Returns a one-line summary, or "" if untouched."""
     cat = out.get("category")
-    wants_stop = cat == "stop" or inbound_is_primary
-    if not wants_stop:
+    if not inbound_is_primary:
         return ""
     try:
         drips = ds.running_drips(prop_uuid)
