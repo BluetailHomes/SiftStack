@@ -13,6 +13,10 @@ name: Drip Exit Guard
 # scheduled jobs late under load (observed up to several hours on the
 # stage2 workflow) — Rahaf's brief keeps the manual "remove from campaign"
 # step as the fallback for anything that slips through.
+#
+# Since 2026-10-21 the guard also runs as a step of the SMS auto-responder job,
+# which the Cloudflare Worker (dispatcher/) starts every 5 minutes on time.
+# This cron is now only the fallback; the guard is idempotent.
 
 on:
   schedule:

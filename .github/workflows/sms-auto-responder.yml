@@ -46,6 +46,19 @@ jobs:
           ARGS="--since-minutes ${{ github.event.inputs.since_minutes || '180' }}"
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           python src/sms_auto_responder.py $ARGS
+      # Drip exit guard rides on this job (added 2026-10-21) so it runs every 5 minutes on the
+      # dispatcher's clock instead of only on its own */15 GitHub cron, which runs hours late.
+      # always(): a responder failure must not skip the guard. Idempotent, so the fallback cron
+      # in drip-exit-guard.yml running too is harmless.
+      - name: Drip exit guard
+        if: always()
+        env:
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          DRIP_GUARD_TAGS: "Priority 1"
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="--dry-run"; fi
+          python src/drip_exit_guard.py $ARGS
       - uses: actions/upload-artifact@v4
         if: always()
         with:
