@@ -4,18 +4,19 @@ name: SMS auto-responder (draft mode)
 # docs/sms_reply_rules.md, and writes a suggested reply + proposed changes to the record's
 # message board (and Slack). Draft mode sends NOTHING to sellers. See src/sms_auto_responder.py.
 #
-# Runs every 5 minutes, 7:00 AM to 10:55 PM Central (12:00-03:55 UTC). GitHub may delay
-# scheduled runs; the 20-minute lookback plus message-board markers keep it idempotent.
+# TRIGGER (changed 2026-10-21): started every 5 minutes, 7:00 AM to 10:55 PM Central, by the
+# Cloudflare Worker in dispatcher/ via workflow_dispatch. It has NO GitHub `schedule:` cron on
+# purpose: GitHub ran the old */5 cron only 3 times in 9 hours on 2026-10-20 (a 3-hour cadence
+# with a 20-minute lookback silently skipped most replies), and a second trigger could run
+# concurrently with the dispatcher's and draft the same reply twice. The default lookback is
+# 180 minutes so one missed poll never loses a reply; message-board markers keep it idempotent.
 
 on:
-  schedule:
-    - cron: "*/5 12-23 * * *"
-    - cron: "*/5 0-3 * * *"
   workflow_dispatch:
     inputs:
       since_minutes:
         description: "Lookback window in minutes"
-        default: "20"
+        default: "180"
       dry_run:
         description: "true = classify only, write nothing"
         default: "false"
@@ -41,7 +42,7 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SMS_RESPONDER_MODEL: claude-sonnet-5-5
         run: |
-          ARGS="--since-minutes ${{ github.event.inputs.since_minutes || '20' }}"
+          ARGS="--since-minutes ${{ github.event.inputs.since_minutes || '180' }}"
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           python src/sms_auto_responder.py $ARGS
       - uses: actions/upload-artifact@v4

@@ -15,7 +15,7 @@ compatibility_date = "2026-10-01"
 
 [vars]
 GITHUB_REPO = "BluetailHomes/SiftStack"
-WORKFLOW_FILE = "pm-text-sender.yml"
+WORKFLOW_FILE = "pm-text-sender.yml"   # default; a JOB in src/index.js may name its own workflow
 GITHUB_REF = "main"
 
 # Cloudflare cron is UTC and has no time zone, so each Central-time slot has a CDT
@@ -29,6 +29,7 @@ crons = [
   "50 14,15 * * 1-5",  # 09:50 Central am-start (14:50 UTC in CDT, 15:50 UTC in CST)
   "30 21,22 * * 1-5",  # 16:30 Central pm-texts
   "15 0,1 * * 2-6",    # 19:15 Central audit (next UTC day, hence Tue-Sat)
+  "*/5 * * * *",       # sms-responder poll; src/index.js limits it to 07:00-22:59 Central, every day
 ]
 
 [observability]
