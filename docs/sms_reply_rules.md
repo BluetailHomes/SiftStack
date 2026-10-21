@@ -27,7 +27,7 @@ flag a human.
 | probate_death | "It's my mom's house, she passed", "In probate", "The owner died" | I'm so sorry for your loss. If the family decides to sell at some point, I'd be glad to help make it simple. Who's handling things? | CORRECT | New Lead | yes |
 | already_sold | "Already sold", "We sold it", "Sold last year" | Thanks, congratulations. | CORRECT | Exhausted | yes (Kaycie checks) |
 | has_realtor | "I have a realtor", "It's listed", "Talk to my agent" | Understood. If the listing doesn't work out, I'm here. | CORRECT | Not Interested | no |
-| stop | "STOP", "Remove me", "Don't contact me", "Unsubscribe", "Take me off your list" | (none; the carrier blocks further texts) | DNC | Not Interested | no |
+| stop | "STOP", "Remove me", "Don't contact me", "Unsubscribe", "Take me off your list" | (none; the carrier blocks further texts) | DNC (the responder auto-marks only the replying number: CORRECT_DNC, or WRONG_DNC if it was Wrong/Dead). The drip is pulled only if that number is the primary. | Not Interested | no (STOPs never post to Google Chat; Slack only) |
 | scam_question | "Is this a scam?", "Is this real?", "Are you legit" | Not a scam, just a local investor. Happy to give you my number to call back: 816-955-3574. | leave | leave | no |
 | unclear | Anything that doesn't fit, a photo, an emoji, a one-word reply with no meaning, an angry wall of text | (none) | leave | leave | yes |
 
