@@ -242,11 +242,14 @@ def classify(rules: str, ctx: dict, model: str) -> dict | None:
     return out
 
 
-def slack(text: str) -> None:
-    """Post to every chat webhook that is configured (Slack and/or Google Chat; both take {"text": ...})."""
+def slack(text: str, needs_human: bool = False) -> None:
+    """Post to the chat webhooks. Slack gets every draft; Google Chat (Rahaf's space) gets only the
+    drafts flagged needs-a-human, unless GOOGLE_CHAT_ALL=true."""
     for name, env in (("Slack", "SLACK_WEBHOOK_URL"), ("Google Chat", "GOOGLE_CHAT_WEBHOOK_URL")):
         url = os.environ.get(env)
         if not url:
+            continue
+        if env == "GOOGLE_CHAT_WEBHOOK_URL" and not needs_human and os.environ.get("GOOGLE_CHAT_ALL", "").lower() != "true":
             continue
         try:
             requests.post(url, json={"text": text}, timeout=15)
@@ -317,7 +320,7 @@ def handle(ds: DataSift, rules: str, ev: dict, mode: str, dry_run: bool, model: 
     slack(f"*Auto-reply draft* {d['address'].get('street')} — {out['category']}"
           f"{' — needs a human' if out.get('needs_human') else ''}\n"
           f"> {ctx['inbound_text']}\nSuggested: {out.get('reply') or '(none)'}\n"
-          f"https://app.reisift.io/records/properties/{pu}/details")
+          f"https://app.reisift.io/records/properties/{pu}/details", needs_human=bool(out.get("needs_human")))
     return result
 
 
