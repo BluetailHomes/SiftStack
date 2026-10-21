@@ -40,6 +40,7 @@ jobs:
           REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GOOGLE_CHAT_WEBHOOK_URL: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
           SMS_RESPONDER_MODEL: claude-sonnet-5-5
         run: |
           ARGS="--since-minutes ${{ github.event.inputs.since_minutes || '180' }}"
