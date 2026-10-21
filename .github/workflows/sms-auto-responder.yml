@@ -43,7 +43,7 @@ jobs:
           GOOGLE_CHAT_WEBHOOK_URL: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
           SMS_RESPONDER_MODEL: claude-sonnet-5-5
         run: |
-          ARGS="--since-minutes ${{ github.event.inputs.since_minutes || '180' }}"
+          ARGS="--since-minutes ${{ github.event.inputs.since_minutes || '30' }}"
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           python src/sms_auto_responder.py $ARGS
       - uses: actions/upload-artifact@v4
