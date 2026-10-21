@@ -165,3 +165,17 @@ def test_pm_text_already_sent_number_is_skipped():
 def test_pm_text_rotation_unchanged_without_prior():
     to_send, _ = pm_text_sender.plan_pm_texts([_model(i) for i in range(6)], DAY, "rahaf", set())
     assert [e["line"] for e in to_send] == list(pm_text_sender.PM_LINES) * 2
+
+
+def test_pm_text_landline_number_is_skipped():
+    m = _model(1)
+    m["phones"]["8165550001"]["type"] = "LANDLINE"
+    to_send, skipped = pm_text_sender.plan_pm_texts([m], DAY, "rahaf", set())
+    assert not to_send and skipped[0]["why"].startswith("number is LANDLINE, not mobile")
+
+
+def test_pm_text_mobile_or_untyped_number_is_sent():
+    a, b = _model(1), _model(2)
+    a["phones"]["8165550001"]["type"] = "MOBILE"
+    to_send, skipped = pm_text_sender.plan_pm_texts([a, b], DAY, "rahaf", set())
+    assert not skipped and len(to_send) == 2
