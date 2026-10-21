@@ -247,7 +247,8 @@ def final_mark(m: dict, number: str, caller: str) -> str | None:
 
 
 # ----------------------------------------------------------------- pm texts
-def plan_pm_texts(models: list[dict], day: str, caller: str, already_sent: set[str]) -> tuple[list[dict], list[dict]]:
+def plan_pm_texts(models: list[dict], day: str, caller: str, already_sent: set[str],
+                  prior_line_counts: Counter | None = None) -> tuple[list[dict], list[dict]]:
     """Return (to_send, skipped). One text per number per day, exact number the voicemail went to."""
     to_send, skipped, seen_numbers = [], [], set()
     for m in models:
@@ -287,16 +288,18 @@ def plan_pm_texts(models: list[dict], day: str, caller: str, already_sent: set[s
                 skipped.append({**entry, "why": why})
             else:
                 to_send.append(entry)
-    # line rotation + per-line cap
-    counts, i = Counter(), 0
+    # line rotation + per-line cap. The cap counts texts already sent from each line earlier
+    # today (a retry after a partial run), so a line never goes past MAX_PER_LINE in a day.
+    counts, i = Counter(prior_line_counts or {}), 0
     for e in to_send:
-        line = PM_LINES[i % len(PM_LINES)]
+        free = [PM_LINES[(i + k) % len(PM_LINES)] for k in range(len(PM_LINES))]
+        free = [ln for ln in free if counts[ln] < MAX_PER_LINE]
         i += 1
-        if counts[line] >= MAX_PER_LINE:
+        if not free:
             e["line"], e["overflow"] = None, True
             continue
-        counts[line] += 1
-        e["line"], e["overflow"] = line, False
+        counts[free[0]] += 1
+        e["line"], e["overflow"] = free[0], False
     return to_send, skipped
 
 
@@ -328,7 +331,8 @@ def run_pm_texts(args) -> int:
     already = {s["to"] for s in sent_log if s.get("ok")}
 
     models = load_day(api, day, CALLER_EMAIL)
-    to_send, skipped = plan_pm_texts(models, day, CALLER_EMAIL, already)
+    prior_counts = Counter(s.get("line") for s in sent_log if s.get("ok") and s.get("line"))
+    to_send, skipped = plan_pm_texts(models, day, CALLER_EMAIL, already, prior_counts)
     lines = [f"Afternoon texts for {day} ({'LIVE' if live else 'DRY RUN'}): {sum(1 for e in to_send if not e['overflow'])} to send, "
              f"{sum(1 for e in to_send if e['overflow'])} over line cap, {len(skipped)} skipped"]
     for e in to_send:
@@ -338,6 +342,7 @@ def run_pm_texts(args) -> int:
     results = []
     if live:
         token = _env("SMRTPHONE_API_TOKEN") or sys.exit("SMRTPHONE_API_TOKEN missing")
+        state_file.write_text(json.dumps(sent_log, indent=1, default=str), encoding="utf-8")
         for e in to_send:
             if e["overflow"]:
                 continue
@@ -471,11 +476,12 @@ def _best_primary(phones: dict) -> str | None:
     return None
 
 
-def plan_am_start(api: Sift) -> tuple[list[dict], list[dict]]:
-    """Records preset 01 would show right now, split into (ready, blocked) with the reason for each block."""
+def plan_am_start(api: Sift, prior_line_counts: Counter | None = None) -> tuple[list[dict], list[dict]]:
+    """Records preset 01 would show right now, split into (ready, blocked) with the reason for each block.
+    prior_line_counts = records already started per line earlier today, so the daily cap holds across runs."""
     must = _preset_must(api, PRESET_01_TITLE)
     rows = api.search(must)
-    ready, blocked, per_line = [], [], Counter()
+    ready, blocked, per_line = [], [], Counter(prior_line_counts or {})
     for row in rows:
         u = row["uuid"]
         det = api.call(f"/api/internal/property/{u}/")
@@ -517,8 +523,10 @@ def run_am_start(args) -> int:
         print(f"Outside window {args.only_between} Central (now {ct_now():%H:%M}); nothing started.")
         return 0
     api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
-    ready, blocked = plan_am_start(api)
     day = ct_now().date().isoformat()
+    state_file = STATE_DIR / f"am_start_{day}.json"
+    prior = json.loads(state_file.read_text(encoding="utf-8")).get("results", []) if state_file.exists() else []
+    ready, blocked = plan_am_start(api, Counter(r.get("line") for r in prior if r.get("ok") and r.get("line")))
     lines = [f"Morning start for {day} ({'LIVE' if live else 'DRY RUN'}): {len(ready)} to set Prospecting, {len(blocked)} held back"]
     for e in ready:
         lines.append(f"  START {e['street']} | {e['owner_first']} | {e['line']} | primary ...{e['primary'][-4:]}")
@@ -548,7 +556,7 @@ def run_am_start(args) -> int:
     report = "\n".join(lines)
     print(report)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    (STATE_DIR / f"am_start_{day}.json").write_text(json.dumps({"ready": ready, "blocked": blocked, "results": results}, indent=1, default=str), encoding="utf-8")
+    state_file.write_text(json.dumps({"ready": ready, "blocked": blocked, "results": prior + results}, indent=1, default=str), encoding="utf-8")
     if args.slack:
         _slack(report)
     return 0

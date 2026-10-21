@@ -15,6 +15,7 @@ const JOBS = [
     workflow: "sms-auto-responder.yml", inputs: { since_minutes: "180" } },
 ];
 const TOLERANCE_MIN = 5;
+const INTERVAL_CRON = "*/5 * * * *";  // must match the interval entry in wrangler.toml
 const WEEKDAYS = new Set(["Mon", "Tue", "Wed", "Thu", "Fri"]);
 
 function centralNow(date = new Date()) {
@@ -66,7 +67,11 @@ async function slack(env, text) {
 export default {
   async scheduled(event, env, ctx) {
     const now = centralNow(new Date(event.scheduledTime));
-    const jobs = jobsForNow(now);
+    // The */5 interval cron also fires at each slot's minute (:50, :30, :15), so each cron
+    // only starts its own kind of job; without this every slot job was dispatched twice
+    // (two am-start runs 2 seconds apart on 2026-10-21).
+    const fromInterval = event.cron === INTERVAL_CRON;
+    const jobs = jobsForNow(now).filter((j) => Boolean(j.everyMinutes) === fromInterval);
     const stamp = `${now.weekday} ${String(now.hour).padStart(2, "0")}:${String(now.minute).padStart(2, "0")} Central`;
     if (!jobs.length) { console.log(`cron ${event.cron} at ${stamp}: no job due (other DST entry or outside hours), nothing to do`); return; }
     if (!env.GITHUB_TOKEN) {

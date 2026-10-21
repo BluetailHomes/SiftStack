@@ -58,16 +58,32 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.mode == 'am-start')
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Overlapping starts queue instead of running side by side. The guard step then skips
+    # a start after one that already finished today, carries earlier runs' state over (so
+    # line caps count the whole day), and fails closed with a Slack alert when unsure.
+    concurrency:
+      group: pm-text-sender-am-start
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Once-per-day guard
+        id: guard
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python src/workflow_run_guard.py am-start 09:40-12:00 "Start morning texts"
       - name: Start morning texts (dry run unless AM_START_LIVE is "true")
         env:
           REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           LIVE: ${{ vars.AM_START_LIVE }}
+        if: steps.guard.outputs.skip != 'true'
         run: |
           ARGS="am-start --slack"
           if [ "$LIVE" = "true" ]; then ARGS="$ARGS --send"; fi
@@ -84,11 +100,27 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'pm-texts'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Same once-per-day protection as am-start: the "already texted today" check in
+    # pm_text_sender.py depends on DataSift logging API-sent texts (unverified), so a
+    # second same-day run must not get as far as sending.
+    concurrency:
+      group: pm-text-sender-pm-texts
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Once-per-day guard
+        id: guard
+        if: inputs.day == ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python src/workflow_run_guard.py pm-texts 16:15-17:00 "Afternoon voicemail texts"
       - name: Afternoon voicemail texts (dry run unless PM_TEXTS_LIVE is "true")
         env:
           REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
@@ -96,6 +128,7 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           LIVE: ${{ vars.PM_TEXTS_LIVE }}
           DAY: ${{ inputs.day }}
+        if: steps.guard.outputs.skip != 'true'
         run: |
           ARGS="pm-texts --slack"
           if [ "$LIVE" = "true" ] && [ -z "$DAY" ]; then ARGS="$ARGS --send"; fi
