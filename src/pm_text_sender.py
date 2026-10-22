@@ -58,7 +58,10 @@ PM_LINES = ["8166084051", "8167100226", "8167100554"]          # afternoon voice
 CALL_LINES = {"8167889485", "8167595422", "8167100448", "8167100146"}
 DRIP_LINES = {"8162545235", "8169553316", "8167889952"}
 CALLBACK_LINE = "8169553574"
-LEGACY_LINE = "8167889386"
+# Legacy follow-up lines: KC (816) 788-9386, OK (405) 764-1708, NM (505) 520-1714.
+# Each lead is called, voicemailed and texted from its own market's line.
+LEGACY_LINES = {"8167889386", "4057641708", "5055201714"}
+LEGACY_TEXT_CAP = 20
 LEGACY_TAG_PREFIX = "Legacy Recall"
 MAX_PER_LINE = 25
 MIN_VM_SECONDS = 20
@@ -589,13 +592,25 @@ def build_audit(models: list[dict], day: str, caller: str, legacy: dict | None =
                         and any(_eligible(p) for p in m["phones"].values()))
     if batch_idle:
         out.append(f":warning: Batch records in Prospecting with an eligible number and no call today: " + "; ".join(batch_idle[:12]))
-    legacy = [(m, c) for m, c in dials if c["from"] == LEGACY_LINE]
+    legacy = [(m, c) for m, c in dials if c["from"] in LEGACY_LINES]
     legacy_untagged = sorted({m["street"] for m, _ in legacy if not any(str(t).startswith(LEGACY_TAG_PREFIX) for t in m["tags"])})
-    out.append(f"Legacy: {len(legacy)} calls from the legacy line on {len({m['uuid'] for m, _ in legacy})} records"
+    out.append(f"Legacy: {len(legacy)} calls from the legacy lines on {len({m['uuid'] for m, _ in legacy})} records"
                + (f"; :warning: not tagged after the call: {'; '.join(legacy_untagged[:10])}" if legacy_untagged else "") + ".")
-    legacy_texts = [m["street"] for m in models if any(c["from"] == LEGACY_LINE for c in m["calls"]) and any(s["manual"] for s in m["sms_out"])]
-    if legacy_texts:
-        out.append(f":warning: Texts sent on legacy records (rule: no texts): {'; '.join(legacy_texts[:10])}")
+    # Rule: call, voicemail, then a text to the same number from the same line.
+    legacy_no_text = sorted({f"{m['street']} ({c['to'][-4:]})" for m, c in legacy
+                             if c["result"] == "answered" and (c["dur"] or 0) >= MIN_VM_SECONDS
+                             and final_mark(m, c["to"], caller) == "NO_ANSWER"
+                             and not any(s["from"] == c["from"] and s["to"] == c["to"] and s["ct"] >= c["ct"] for s in m["sms_out"])})
+    if legacy_no_text:
+        out.append(f":warning: Legacy voicemail with no text after it from the same line: {'; '.join(legacy_no_text[:10])}")
+    legacy_wrong_line = sorted({m["street"] for m, c in legacy for s in m["sms_out"]
+                                if s["manual"] and s["to"] == c["to"] and s["from"] != c["from"]})
+    if legacy_wrong_line:
+        out.append(f":warning: Legacy text sent from a different line than the call: {'; '.join(legacy_wrong_line[:10])}")
+    legacy_sent = Counter(s["from"] for m in models for s in m["sms_out"] if s["from"] in LEGACY_LINES)
+    over = [f"{n[-4:]}={k}" for n, k in sorted(legacy_sent.items()) if k > LEGACY_TEXT_CAP]
+    if over:
+        out.append(f":warning: Legacy line over {LEGACY_TEXT_CAP} texts today: {', '.join(over)}")
     return "\n".join(out)
 
 
