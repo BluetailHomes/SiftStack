@@ -738,6 +738,133 @@ def run_am_start(args) -> int:
     return 0
 
 
+# ----------------------------------------------------------- extra numbers
+# One confirmation text, ever, to each extra mobile on a prospecting record. Calls and the drip stay on #1/#2.
+EXTRA_TEMPLATE = "Hi, trying to reach {first} about {street}. Is this still a good number? - Britney"
+SMS_LINE_NUMBERS = {"SMS Line A": "8162545235", "SMS Line B": "8169553316", "SMS Line C": "8167889952"}
+EXTRA_TAGS = ("Dial First", "Dial Second", "Dial Third")
+EXTRA_OK_MARKS = {"", "UNKNOWN", "NO_ANSWER"}
+EXTRA_LEDGER = STATE_DIR / "extra_texts_sent.json"
+
+
+def _d10(x) -> str:
+    return re.sub(r"\D", "", str(x or ""))[-10:]
+
+
+def extra_numbers(det: dict, texted: set[str], ledger: set[str]) -> tuple[list[str], list[tuple[str, str]]]:
+    """(numbers to text, [(number, why skipped)]) for one property detail. texted = numbers seen in its SMS logs."""
+    owner = det.get("owner") or {}
+    primary = owner.get("primary_phone")
+    primary_num = _d10(primary.get("number") if isinstance(primary, dict) else primary)
+    send, skip = [], []
+    for ph in owner.get("phones") or []:
+        n = _d10(ph.get("number"))
+        if not n or n == primary_num:
+            continue
+        tags = ph.get("tags") or []
+        why = None
+        if not any(t in tags for t in EXTRA_TAGS):
+            why = "not Dial First/Second/Third"
+        elif ph.get("type") != "MOBILE":
+            why = f"type {ph.get('type')}"
+        elif (ph.get("status") or "").upper() not in EXTRA_OK_MARKS:
+            why = f"marked {ph.get('status')}"
+        elif n in texted:
+            why = "already has SMS history"
+        elif n in ledger:
+            why = "already sent a confirmation text"
+        (skip.append((n, why)) if why else send.append(n))
+    return send, skip
+
+
+def plan_extra_texts(api: Sift, prior_line_counts: Counter | None = None, ledger: set[str] | None = None) -> tuple[list[dict], list[dict]]:
+    """Every extra number to text on prospecting records assigned to the caller, split into (planned, skipped)."""
+    ledger = ledger or set()
+    per_line = Counter(prior_line_counts or {})
+    planned, skipped = [], []
+    for row in api.search({"any_property_status": ["prospecting"]}):
+        u = row["uuid"]
+        det = api.call(f"/api/internal/property/{u}/")
+        owner = det.get("owner") or {}
+        street = (det.get("address") or {}).get("street") or ""
+        first = (owner.get("first_name") or "").strip()
+        lines = [t for t in (det.get("tags") or []) if t in SMS_LINE_TAGS]
+        base = {"uuid": u, "street": street, "owner_first": first, "line": lines[0] if len(lines) == 1 else None}
+        why = None
+        if det.get("assigned_to") != CALLER_USER_UUID:
+            why = "not assigned to the caller"
+        elif not first:
+            why = "owner has no first name"
+        elif len(lines) != 1:
+            why = f"needs exactly one SMS Line tag (has {len(lines)})"
+        elif owner.get("dnc") or owner.get("opt_out"):
+            why = "owner DNC/opt-out"
+        if why:
+            skipped.append({**base, "number": None, "why": why})
+            continue
+        evs = (api.call(f"/api/internal/property/{u}/logs/?limit=250&offset=0") or {}).get("results") or []
+        texted, started = set(), None
+        for e in evs:
+            sms = (e.get("payload") or {}).get("sms") or {}
+            if e.get("event_type") in ("owner.sms.sent", "owner.sms.received"):
+                texted |= {_d10(sms.get("origin_number")), _d10(sms.get("destination_number"))}
+            if e.get("event_type") == "property.status.updated":
+                to = (((e.get("payload") or {}).get("property") or {}).get("status") or [None, None])[-1]
+                t = to_ct(e.get("timestamp", ""))
+                if to == "prospecting" and t and (started is None or t > started):
+                    started = t
+        base["started"] = started.date().isoformat() if started else None
+        send, skip = extra_numbers(det, texted, ledger)
+        for n, w in skip:
+            skipped.append({**base, "number": n, "why": w})
+        for n in send:
+            if per_line[base["line"]] >= MAX_PER_LINE:
+                skipped.append({**base, "number": n, "why": f"{base['line']} hit {MAX_PER_LINE} today"})
+                continue
+            per_line[base["line"]] += 1
+            planned.append({**base, "number": n, "from": SMS_LINE_NUMBERS[base["line"]],
+                            "message": EXTRA_TEMPLATE.format(first=first.title(), street=street.title())})
+    return planned, skipped
+
+
+def run_extra_texts(args) -> int:
+    live = bool(args.send)
+    if live and not args.force and args.only_between and not _in_window(args.only_between):
+        print(f"Outside window {args.only_between} Central (now {ct_now():%H:%M}); nothing sent.")
+        return 0
+    api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
+    day = ct_now().date().isoformat()
+    state_file = STATE_DIR / f"extra_texts_{day}.json"
+    prior = json.loads(state_file.read_text(encoding="utf-8")).get("results", []) if state_file.exists() else []
+    ledger = json.loads(EXTRA_LEDGER.read_text(encoding="utf-8")) if EXTRA_LEDGER.exists() else {}
+    planned, skipped = plan_extra_texts(api, Counter(r["line"] for r in prior if r.get("ok")), set(ledger))
+    by_line = Counter(p["line"] for p in planned)
+    lines = [f"Extra-number texts for {day} ({'LIVE' if live else 'DRY RUN'}): {len(planned)} planned "
+             f"({', '.join(f'{k} {v}' for k, v in sorted(by_line.items())) or 'none'}), {len(skipped)} skipped"]
+    for p in planned:
+        lines.append(f"  TEXT {p['street']} | {p['owner_first']} | ...{p['number'][-4:]} from {p['line']}")
+    results = []
+    if live and planned:
+        token = _env("SMRTPHONE_API_TOKEN") or sys.exit("SMRTPHONE_API_TOKEN missing")
+        for p in planned:
+            ok, resp = send_sms(token, p["from"], p["number"], p["message"])
+            results.append({**p, "ok": ok, "resp": resp})
+            if ok:
+                ledger[p["number"]] = {"day": day, "uuid": p["uuid"], "line": p["line"]}
+            time.sleep(2)
+        fails = [r for r in results if not r["ok"]]
+        lines.append(f"Sent {len(results) - len(fails)}; failed {len(fails)}" + "".join(f"\n  FAILED ...{r['number'][-4:]}: {r['resp']}" for r in fails))
+        EXTRA_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+        EXTRA_LEDGER.write_text(json.dumps(ledger, indent=1), encoding="utf-8")
+    report = "\n".join(lines)
+    print(report)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps({"planned": planned, "skipped": skipped, "results": prior + results}, indent=1, default=str), encoding="utf-8")
+    if args.slack:
+        _slack(report)
+    return 0
+
+
 def _slack(text: str, chunk: int = 3500) -> None:
     """Post to the webhook, splitting long reports into several messages at line boundaries."""
     url = _env("SLACK_WEBHOOK_URL")
@@ -785,6 +912,12 @@ def main() -> int:
     m.add_argument("--slack", action="store_true")
     m.add_argument("--only-between", help="Central window like 09:50-12:00")
     m.set_defaults(fn=run_am_start)
+    x = sub.add_parser("extra-texts", help="one confirmation text to each extra mobile number on prospecting records")
+    x.add_argument("--send", action="store_true", help="actually send (default is dry run)")
+    x.add_argument("--force", action="store_true")
+    x.add_argument("--slack", action="store_true")
+    x.add_argument("--only-between", help="Central window like 10:30-12:00")
+    x.set_defaults(fn=run_extra_texts)
     args = ap.parse_args()
     return args.fn(args)
 
