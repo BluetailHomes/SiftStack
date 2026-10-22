@@ -757,7 +757,7 @@ def run_am_start(args) -> int:
 # One confirmation text, ever, to each extra mobile on a prospecting record. Calls and the drip stay on #1/#2.
 EXTRA_TEMPLATE = "Hi, trying to reach {first} about {street}. Is this still a good number? - Britney"
 SMS_LINE_NUMBERS = {"SMS Line A": "8162545235", "SMS Line B": "8169553316", "SMS Line C": "8167889952"}
-EXTRA_TAGS = ("Dial First", "Dial Second", "Dial Third")
+EXTRA_TAGS = ("Dial First", "Dial Second", "Dial Third", "Dial Fourth")
 EXTRA_OK_MARKS = {"", "UNKNOWN", "NO_ANSWER"}
 EXTRA_LEDGER = STATE_DIR / "extra_texts_sent.json"
 
@@ -779,7 +779,7 @@ def extra_numbers(det: dict, texted: set[str], ledger: set[str]) -> tuple[list[s
         tags = ph.get("tags") or []
         why = None
         if not any(t in tags for t in EXTRA_TAGS):
-            why = "not Dial First/Second/Third"
+            why = "not Dial First-Fourth"
         elif ph.get("type") != "MOBILE":
             why = f"type {ph.get('type')}"
         elif (ph.get("status") or "").upper() not in EXTRA_OK_MARKS:
@@ -792,14 +792,30 @@ def extra_numbers(det: dict, texted: set[str], ledger: set[str]) -> tuple[list[s
     return send, skip
 
 
-def plan_extra_texts(api: Sift, prior_line_counts: Counter | None = None, ledger: set[str] | None = None) -> tuple[list[dict], list[dict]]:
-    """Every extra number to text on prospecting records assigned to the caller, split into (planned, skipped)."""
+def plan_extra_texts(api: Sift, prior_line_counts: Counter | None = None, ledger: set[str] | None = None) -> tuple[list[dict], list[dict], dict]:
+    """Every extra number to text on prospecting records assigned to the caller: (planned, skipped, texts already sent today per line)."""
     ledger = ledger or set()
-    per_line = Counter(prior_line_counts or {})
-    planned, skipped = [], []
+    today = ct_now().date()
+    line_of = {v: k for k, v in SMS_LINE_NUMBERS.items()}
+    # Pass 1: every prospecting record's detail + logs, and today's outbound texts per line from
+    # every source (drip, manual, earlier extras), so the cap covers the line's whole day.
+    rows, sent_today = [], Counter()
     for row in api.search({"any_property_status": ["prospecting"]}):
         u = row["uuid"]
         det = api.call(f"/api/internal/property/{u}/")
+        evs = (api.call(f"/api/internal/property/{u}/logs/?limit=250&offset=0") or {}).get("results") or []
+        for e in evs:
+            if e.get("event_type") == "owner.sms.sent":
+                t = to_ct(e.get("timestamp", ""))
+                line = line_of.get(_d10(((e.get("payload") or {}).get("sms") or {}).get("origin_number")))
+                if line and t and t.date() == today:
+                    sent_today[line] += 1
+        rows.append((u, det, evs))
+    # DataSift can lag a few seconds on API sends, so never count fewer than this job's own record.
+    per_line = Counter({k: max(sent_today[k], (prior_line_counts or {}).get(k, 0)) for k in SMS_LINE_NUMBERS})
+    prior_totals = dict(per_line)
+    planned, skipped = [], []
+    for u, det, evs in rows:
         owner = det.get("owner") or {}
         street = (det.get("address") or {}).get("street") or ""
         first = (owner.get("first_name") or "").strip()
@@ -817,7 +833,6 @@ def plan_extra_texts(api: Sift, prior_line_counts: Counter | None = None, ledger
         if why:
             skipped.append({**base, "number": None, "why": why})
             continue
-        evs = (api.call(f"/api/internal/property/{u}/logs/?limit=250&offset=0") or {}).get("results") or []
         texted, started = set(), None
         for e in evs:
             sms = (e.get("payload") or {}).get("sms") or {}
@@ -839,7 +854,7 @@ def plan_extra_texts(api: Sift, prior_line_counts: Counter | None = None, ledger
             per_line[base["line"]] += 1
             planned.append({**base, "number": n, "from": SMS_LINE_NUMBERS[base["line"]],
                             "message": EXTRA_TEMPLATE.format(first=first.title(), street=street.title())})
-    return planned, skipped
+    return planned, skipped, prior_totals
 
 
 def run_extra_texts(args) -> int:
@@ -852,10 +867,11 @@ def run_extra_texts(args) -> int:
     state_file = STATE_DIR / f"extra_texts_{day}.json"
     prior = json.loads(state_file.read_text(encoding="utf-8")).get("results", []) if state_file.exists() else []
     ledger = json.loads(EXTRA_LEDGER.read_text(encoding="utf-8")) if EXTRA_LEDGER.exists() else {}
-    planned, skipped = plan_extra_texts(api, Counter(r["line"] for r in prior if r.get("ok")), set(ledger))
+    planned, skipped, already = plan_extra_texts(api, Counter(r["line"] for r in prior if r.get("ok")), set(ledger))
     by_line = Counter(p["line"] for p in planned)
-    lines = [f"Extra-number texts for {day} ({'LIVE' if live else 'DRY RUN'}): {len(planned)} planned "
-             f"({', '.join(f'{k} {v}' for k, v in sorted(by_line.items())) or 'none'}), {len(skipped)} skipped"]
+    lines = [f"Extra-number texts for {day} ({'LIVE' if live else 'DRY RUN'}): {len(planned)} planned, {len(skipped)} skipped"]
+    for k in SMS_LINE_NUMBERS:
+        lines.append(f"  {k}: {already.get(k, 0)} already sent today + {by_line[k]} planned = {already.get(k, 0) + by_line[k]}/{MAX_PER_LINE}")
     for p in planned:
         lines.append(f"  TEXT {p['street']} | {p['owner_first']} | ...{p['number'][-4:]} from {p['line']}")
     results = []
