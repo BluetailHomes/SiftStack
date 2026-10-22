@@ -227,7 +227,8 @@ def load_day(api: Sift, day: str, caller: str) -> list[dict]:
             "sms_out": [{"ct": e["_ct"], "from": e["payload"]["sms"].get("origin_number") or "", "to": e["payload"]["sms"].get("destination_number") or "",
                          "manual": bool((e["payload"]["sms"].get("external_user") or {}).get("email")),
                          "by": (e["payload"]["sms"].get("external_user") or {}).get("email")} for e in today if e["event_type"] == "owner.sms.sent"],
-            "sms_in": [{"ct": e["_ct"], "from": e["payload"]["sms"].get("origin_number") or ""} for e in today if e["event_type"] == "owner.sms.received"],
+            "sms_in": [{"ct": e["_ct"], "from": e["payload"]["sms"].get("origin_number") or "", "text": e["payload"]["sms"].get("message") or ""}
+                       for e in today if e["event_type"] == "owner.sms.received"],
             "marks": [{"ct": e["_ct"], "phone": e["payload"]["owner"].get("phone"), "to": (e["payload"]["owner"].get("status") or [None, None])[-1], "by": _who(e)}
                       for e in today if e["event_type"] == "owner.phone.status.updated"],
             "status_changes": [{"ct": e["_ct"], "to": (e["payload"]["property"].get("status") or [None, None])[-1], "by": _who(e)} for e in today if e["event_type"] == "property.status.updated"],
@@ -244,6 +245,16 @@ def tier(m: dict, number: str) -> str:
     p = m["phones"].get(number)
     tags = [t for t in (p.get("tags") or []) if t.startswith("Dial") or t == "Drop"] if p else []
     return tags[0] if tags else ("(not on record)" if not p else "(untagged)")
+
+
+# A seller's sign-off ("okay", "thanks", a thumbs up) needs no reply.
+_ACK_RE = re.compile(r"^(ok(ay)?|k|kk|thanks?( you)?|thx|ty|sounds good|got it|will do|np|no problem)"
+                     r"( thanks?( you)?)?$", re.I)
+
+
+def is_ack(text: str) -> bool:
+    t = re.sub(r"[^\w\s]", "", text or "").strip()
+    return bool(text and text.strip()) and "?" not in text and (not t or bool(_ACK_RE.match(re.sub(r"\s+", " ", t))))
 
 
 def final_mark(m: dict, number: str, caller: str) -> str | None:
@@ -469,7 +480,7 @@ def build_audit(models: list[dict], day: str, caller: str) -> str:
             if (m["phones"].get(n) or {}).get("status") == "WRONG":
                 wrong_not_dnc.append(f"{m['street']} ...{n[-4:]}")
         # After-shift inbounds are tomorrow's work, not a miss today.
-        inbound = sorted(t for t in [c["ct"] for c in m["calls"] if c["dir"] == "inbound"] + [s["ct"] for s in m["sms_in"]]
+        inbound = sorted(t for t in [c["ct"] for c in m["calls"] if c["dir"] == "inbound"] + [s["ct"] for s in m["sms_in"] if not is_ack(s["text"])]
                          if f"{t:%H:%M}" < SHIFT[1])
         if not inbound or m["notes"] or (m["open_tasks"] or 0) or any(x["by"] == caller and x["to"] not in (None, "prospecting") for x in m["status_changes"]):
             continue
