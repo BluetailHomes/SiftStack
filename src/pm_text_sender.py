@@ -235,6 +235,7 @@ def load_day(api: Sift, day: str, caller: str) -> list[dict]:
             "attempt_bumps": [e["_ct"] for e in today if e["event_type"] == "property.predictivecall.attempts.increased" and _who(e) == caller],
             "notes": [e["_ct"] for e in today if e["event_type"] in ("property.message.added", "property.message.updated") and _who(e) == caller],
             "actions": [e["_ct"] for e in today if _actor(e) == caller],
+            "task_events": sum(1 for e in today if "task" in e["event_type"] and _actor(e) == caller),
             "tags_added": [(t, _who(e)) for e in today if e["event_type"] == "property.tags.added" for t in ((e.get("payload") or {}).get("tags") or [])],
         }
         models.append(m)
@@ -426,9 +427,76 @@ def work_time(models: list[dict], caller: str) -> list[str]:
     return out
 
 
-def build_audit(models: list[dict], day: str, caller: str) -> str:
+# Legacy follow-up presets Rahaf works each day (ZZ LEGACY TRIAGE folder), by exact title.
+LEGACY_PRESETS = {"01 Finish Out": "01. Active - finish out", "06 NI Recall": "06. Legacy NI Recall - Jackson"}
+
+
+def load_legacy_presets(api: Sift, day: str) -> dict:
+    """{label: {"in_preset": uuids now in the preset, "tagged_today": uuids with the preset's tag updated today}}.
+
+    A record Rahaf works can leave the preset the same day (status change, excluded
+    tag), so the base is the preset now plus anything with its tag touched today.
+    """
+    rows = api.call("/api/internal/filter-preset/?limit=500")
+    rows = rows.get("results") or rows.get("data") or rows
+    d0 = dt.date.fromisoformat(day)
+    out = {}
+    for label, title in LEGACY_PRESETS.items():
+        pz = next((x for x in rows if str(x.get("title", "")).strip() == title), None)
+        if not pz:
+            out[label] = None
+            continue
+        must = (pz.get("filters") or {}).get("must") or {}
+        now = {r["uuid"] for r in api.search(must)}
+        tagged = set()
+        if must.get("any_tags"):
+            tagged = {r["uuid"] for r in api.search({"any_tags": must["any_tags"],
+                      "updated": [(d0 - dt.timedelta(days=1)).isoformat(), (d0 + dt.timedelta(days=1)).isoformat()]})}
+        out[label] = {"in_preset": now, "tagged_today": tagged}
+    return out
+
+
+def legacy_preset_lines(models: list[dict], legacy: dict, caller: str) -> list[str]:
+    """Worked = a call, text, note, phone mark or status change by the caller. Task completions alone are listed apart."""
+    by_uuid = {m["uuid"]: m for m in models}
+    parts, idle = [], []
+    for label, sets in legacy.items():
+        if sets is None:
+            parts.append(f"{label}: preset not found")
+            continue
+        # The tag is broad (06 matches the old "Bluetail 1.0" tag), so the "left the preset
+        # today" extension skips Priority 1 records (their calls are P1 work) and records
+        # sitting in another legacy preset.
+        others = set().union(*(s["in_preset"] for k, s in legacy.items() if k != label and s))
+        base = sets["in_preset"] | {u for u in sets["tagged_today"] - others
+                                    if u in by_uuid and "Priority 1" not in by_uuid[u]["tags"]}
+        calls = texts = 0
+        worked, tasks_only = set(), set()
+        for u in base:
+            m = by_uuid.get(u)
+            if not m:
+                continue
+            c = sum(1 for x in m["calls"] if x["by"] == caller and x["dir"] == "outbound")
+            t = sum(1 for x in m["sms_out"] if x["by"] == caller)
+            other = len(m["notes"]) + sum(1 for x in m["marks"] if x["by"] == caller) + sum(1 for x in m["status_changes"] if x["by"] == caller)
+            calls, texts = calls + c, texts + t
+            if c or t or other:
+                worked.add(u)
+            elif m.get("task_events"):
+                tasks_only.add(u)
+        parts.append(f"{label} worked {len(worked)} of {len(base)} (calls {calls}, texts {texts})"
+                     + (f", {len(tasks_only)} with task completions only" if tasks_only else ""))
+        if base and not worked:
+            idle.append(label)
+    return [(":warning: " if idle else "") + "Legacy presets: " + "; ".join(parts) + "."
+            + (f" No follow-up on {', '.join(idle)}." if idle else "")]
+
+
+def build_audit(models: list[dict], day: str, caller: str, legacy: dict | None = None) -> str:
     out = [f"*Caller audit {day} ({caller})*"]
     out += work_time(models, caller)
+    if legacy:
+        out += legacy_preset_lines(models, legacy, caller)
     dials = [(m, c) for m in models for c in m["calls"] if c["by"] == caller and c["dir"] == "outbound"]
     if not dials:
         out.append("No outbound calls logged for this caller today.")
@@ -529,7 +597,12 @@ def run_audit(args) -> int:
         return 0
     api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
     day = args.day or ct_now().date().isoformat()
-    report = build_audit(load_day(api, day, CALLER_EMAIL), day, CALLER_EMAIL)
+    try:
+        legacy = load_legacy_presets(api, day)
+    except RuntimeError as e:
+        print(f"(legacy presets skipped: {e})")
+        legacy = None
+    report = build_audit(load_day(api, day, CALLER_EMAIL), day, CALLER_EMAIL, legacy)
     print(report)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     (STATE_DIR / f"audit_{day}.md").write_text(report, encoding="utf-8")
