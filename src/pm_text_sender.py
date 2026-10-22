@@ -62,6 +62,10 @@ LEGACY_LINE = "8167889386"
 LEGACY_TAG_PREFIX = "Legacy Recall"
 MAX_PER_LINE = 25
 MIN_VM_SECONDS = 20
+SHIFT = ("10:00", "19:00")   # Rahaf's agreed shift, Central (Kaycie, 2026-10-21)
+DIAL_FLOOR = 150             # daily dial floor (rahaf-kpi-scorecard production standards)
+SESSION_GAP_MIN = 15         # actions closer than this count as continuous work
+BREAK_MIN = 30               # gaps at least this long inside the shift are listed
 SEND_WINDOW = (16, 18)   # Central hours during which a scheduled --send is allowed
 TERMINAL_MARKS = {"CORRECT", "WRONG", "DEAD", "DNC", "CORRECT_DNC", "WRONG_DNC"}   # marks that end the afternoon text for a number
 BAD_MARKS = {"WRONG", "DEAD", "DNC", "CORRECT_DNC", "WRONG_DNC"}                    # marks that disqualify a number as the drip's primary phone
@@ -159,6 +163,16 @@ def _who(e: dict) -> str:
     return a.get("email") or e.get("author") or ""
 
 
+def _actor(e: dict) -> str:
+    """Who did it: the smrtPhone user on a call/SMS event, else the log author."""
+    p = e.get("payload") or {}
+    for k in ("call", "sms"):
+        x = p.get(k)
+        if isinstance(x, dict) and (x.get("external_user") or {}).get("email"):
+            return x["external_user"]["email"]
+    return _who(e)
+
+
 def load_day(api: Sift, day: str, caller: str) -> list[dict]:
     """Every record with activity on `day` (Central), modelled for the rules below."""
     d0 = dt.date.fromisoformat(day)
@@ -211,13 +225,15 @@ def load_day(api: Sift, day: str, caller: str) -> list[dict]:
             "phones": phones, "open_tasks": rec.get("tasks") if isinstance(rec.get("tasks"), int) else None,
             "calls": sorted(calls.values(), key=lambda c: c["ct"]), "call_days": all_call_days,
             "sms_out": [{"ct": e["_ct"], "from": e["payload"]["sms"].get("origin_number") or "", "to": e["payload"]["sms"].get("destination_number") or "",
-                         "manual": bool((e["payload"]["sms"].get("external_user") or {}).get("email"))} for e in today if e["event_type"] == "owner.sms.sent"],
+                         "manual": bool((e["payload"]["sms"].get("external_user") or {}).get("email")),
+                         "by": (e["payload"]["sms"].get("external_user") or {}).get("email")} for e in today if e["event_type"] == "owner.sms.sent"],
             "sms_in": [{"ct": e["_ct"], "from": e["payload"]["sms"].get("origin_number") or ""} for e in today if e["event_type"] == "owner.sms.received"],
             "marks": [{"ct": e["_ct"], "phone": e["payload"]["owner"].get("phone"), "to": (e["payload"]["owner"].get("status") or [None, None])[-1], "by": _who(e)}
                       for e in today if e["event_type"] == "owner.phone.status.updated"],
             "status_changes": [{"ct": e["_ct"], "to": (e["payload"]["property"].get("status") or [None, None])[-1], "by": _who(e)} for e in today if e["event_type"] == "property.status.updated"],
             "attempt_bumps": [e["_ct"] for e in today if e["event_type"] == "property.predictivecall.attempts.increased" and _who(e) == caller],
             "notes": [e["_ct"] for e in today if e["event_type"] in ("property.message.added", "property.message.updated") and _who(e) == caller],
+            "actions": [e["_ct"] for e in today if _actor(e) == caller],
             "tags_added": [(t, _who(e)) for e in today if e["event_type"] == "property.tags.added" for t in ((e.get("payload") or {}).get("tags") or [])],
         }
         models.append(m)
@@ -367,18 +383,55 @@ def run_pm_texts(args) -> int:
 
 
 # ----------------------------------------------------------------- audit
+def _hm(minutes: int) -> str:
+    return f"{minutes // 60}h{minutes % 60:02d}m"
+
+
+def work_time(models: list[dict], caller: str) -> list[str]:
+    """Desk time from every DataSift action by the caller (dials, marks, notes, statuses, texts)."""
+    acts = sorted({t for m in models for t in m.get("actions", [])})
+    s0, s1 = (int(x[:2]) * 60 + int(x[3:]) for x in SHIFT)
+    if not acts:
+        return [f":warning: Desk time (shift {SHIFT[0]}-{SHIFT[1]}): no DataSift activity today."]
+    mins = lambda t: t.hour * 60 + t.minute
+    first, last = acts[0], acts[-1]
+    active, breaks, start = 0, [], acts[0]
+    for a, b in zip(acts, acts[1:]):
+        gap = (b - a).total_seconds() / 60
+        if gap > SESSION_GAP_MIN:
+            active += (a - start).total_seconds() / 60
+            start = b
+            if gap >= BREAK_MIN and mins(b) > s0 and mins(a) < s1:
+                breaks.append(f"{a:%H:%M}-{b:%H:%M} ({_hm(int(gap))})")
+    active += (last - start).total_seconds() / 60
+    txt = f"Desk time (shift {SHIFT[0]}-{SHIFT[1]}): first action {first:%H:%M}, last {last:%H:%M}, active about {_hm(int(active))} of {_hm(s1 - s0)}."
+    flags = []
+    if mins(first) > s0 + 15:
+        flags.append(f"started {_hm(mins(first) - s0)} late")
+    if mins(last) < s1 - 15:
+        flags.append(f"ended {_hm(s1 - mins(last))} early")
+    out = [(":warning: " if flags else "") + txt + (" " + ", ".join(flags).capitalize() + "." if flags else "")]
+    out.append("Gaps over 30 min: " + ("; ".join(breaks) if breaks else "none") + ".")
+    return out
+
+
 def build_audit(models: list[dict], day: str, caller: str) -> str:
     out = [f"*Caller audit {day} ({caller})*"]
+    out += work_time(models, caller)
     dials = [(m, c) for m in models for c in m["calls"] if c["by"] == caller and c["dir"] == "outbound"]
     if not dials:
         out.append("No outbound calls logged for this caller today.")
         return "\n".join(out)
     by_line = Counter(c["from"] for _, c in dials)
+    by_hour = Counter(c["ct"].hour for _, c in dials)
     first, last = min(c["ct"] for _, c in dials), max(c["ct"] for _, c in dials)
-    out.append(f"Dials {len(dials)} on {len({m['uuid'] for m, _ in dials})} records, {first:%H:%M} to {last:%H:%M}. "
+    out.append(f"Dials {len(dials)} (floor {DIAL_FLOOR}) on {len({m['uuid'] for m, _ in dials})} records, {first:%H:%M} to {last:%H:%M}. "
                f"Answered {sum(1 for _, c in dials if c['result'] == 'answered')}, no answer {sum(1 for _, c in dials if c['result'] == 'noanswer')}.")
     line_txt = ", ".join(f"...{l[-4:]}={n}{' OVER CAP' if n > MAX_PER_LINE else ''}" for l, n in by_line.most_common())
     unused = [l[-4:] for l in CALL_LINES if l not in by_line]
+    s0, s1 = int(SHIFT[0][:2]), int(SHIFT[1][:2])
+    out.append("Dials by hour: " + ", ".join(f"{h if h <= 12 else h - 12}{'am' if h < 12 else 'pm'} {by_hour[h]}"
+                                             for h in range(min(s0, *by_hour), max(s1 - 1, *by_hour) + 1)) + ".")
     out.append(f"Lines: {line_txt}" + (f"; unused call lines ...{', ...'.join(unused)}" if unused else ""))
     if first.hour * 60 + first.minute > 10 * 60 + 30:
         out.append(f":warning: First dial at {first:%H:%M} (plan: 10:05).")
@@ -409,11 +462,20 @@ def build_audit(models: list[dict], day: str, caller: str) -> str:
         out.append(f":eyes: {len(live)} answered calls of 45s+ not marked No Answer and no note (possible conversation): " + "; ".join(f"{s} ...{n} {d}s" for s, n, d in live[:10]))
     callbacks = []
     for m in models:
-        inbound = [c for c in m["calls"] if c["dir"] == "inbound"] + m["sms_in"]
-        if inbound and not m["notes"] and not (m["open_tasks"] or 0) and not any(x["by"] == caller and x["to"] not in (None, "prospecting") for x in m["status_changes"]):
-            callbacks.append(f"{m['street']} ({len(inbound)} inbound)")
+        if "responder test" in m["street"].lower():
+            continue
+        # After-shift inbounds are tomorrow's work, not a miss today.
+        inbound = sorted(t for t in [c["ct"] for c in m["calls"] if c["dir"] == "inbound"] + [s["ct"] for s in m["sms_in"]]
+                         if f"{t:%H:%M}" < SHIFT[1])
+        if not inbound or m["notes"] or (m["open_tasks"] or 0) or any(x["by"] == caller and x["to"] not in (None, "prospecting") for x in m["status_changes"]):
+            continue
+        # A text or call back from the caller after the last inbound counts as handled.
+        replies = [s["ct"] for s in m["sms_out"] if s["by"] == caller] + [c["ct"] for c in m["calls"] if c["by"] == caller and c["dir"] == "outbound"]
+        if any(r > inbound[-1] for r in replies):
+            continue
+        callbacks.append(f"{m['street']} ({len(inbound)} inbound, last {inbound[-1]:%H:%M})")
     if callbacks:
-        out.append(f":warning: Inbound call/text with no note and no open task: " + "; ".join(callbacks[:10]))
+        out.append(f":warning: Inbound call/text with no reply, note or open task: " + "; ".join(callbacks[:10]))
     vm_due = {(m["uuid"], c["to"]) for m, c in dials if c["result"] == "answered" and (c["dur"] or 0) >= MIN_VM_SECONDS and final_mark(m, c["to"], caller) == "NO_ANSWER"}
     pm_sent = sum(1 for m in models for s in m["sms_out"] if s["from"] in PM_LINES)
     out.append(f"Afternoon texts: {len(vm_due)} voicemail numbers, {pm_sent} texts sent from afternoon lines.")
