@@ -7,6 +7,9 @@ name: PM Text Sender + Caller Audit
 #             voicemail on that day. DRY RUN by default: nothing is sent until
 #             the repo variable PM_TEXTS_LIVE is set to "true"
 #             (Settings -> Secrets and variables -> Actions -> Variables).
+#             Second step: extra-number confirmation texts (one text, ever, to
+#             each mobile beyond #1/#2, from SMS Line A/B/C). Its own dry-run
+#             switch: repo variable EXTRA_TEXTS_LIVE = "true".
 #   audit     7:15 PM Central, Mon-Fri. Posts the end-of-day caller checklist
 #             (unmarked numbers, line caps, missed callbacks, legacy tagging) to Slack.
 #
@@ -133,6 +136,19 @@ jobs:
           ARGS="pm-texts --slack"
           if [ "$LIVE" = "true" ] && [ -z "$DAY" ]; then ARGS="$ARGS --send"; fi
           if [ -n "$DAY" ]; then ARGS="$ARGS --day $DAY"; fi
+          if [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 16:15-17:00"; fi
+          echo "python src/pm_text_sender.py $ARGS"
+          python src/pm_text_sender.py $ARGS
+      - name: Extra-number confirmation texts (dry run unless EXTRA_TEXTS_LIVE is "true")
+        env:
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          SMRTPHONE_API_TOKEN: ${{ secrets.SMRTPHONE_API_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          LIVE: ${{ vars.EXTRA_TEXTS_LIVE }}
+        if: always() && steps.guard.outputs.skip != 'true' && inputs.day == ''
+        run: |
+          ARGS="extra-texts --slack"
+          if [ "$LIVE" = "true" ]; then ARGS="$ARGS --send"; fi
           if [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 16:15-17:00"; fi
           echo "python src/pm_text_sender.py $ARGS"
           python src/pm_text_sender.py $ARGS
