@@ -253,6 +253,20 @@ _ACK_RE = re.compile(r"^(ok(ay)?|k|kk|thanks?( you)?|thx|ty|sounds good|got it|w
                      r"( thanks?( you)?)?$", re.I)
 
 
+# An opt-out text: the SMS responder marks that number DNC itself, so no reply is owed.
+_STOP_RE = re.compile(r"^(stop|stop all|unsubscribe|cancel|end|quit|remove me|opt out)$", re.I)
+DNC_MARKS = {"DNC", "CORRECT_DNC", "WRONG_DNC"}
+
+
+def is_stop(text: str) -> bool:
+    return bool(_STOP_RE.match(re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", text or "")).strip()))
+
+
+def _eligible(p: dict) -> bool:
+    """A Dial First/Second number not yet marked Correct/Wrong/Dead/DNC."""
+    return any(t in ("Dial First", "Dial Second") for t in p.get("tags") or []) and p.get("status") not in TERMINAL_MARKS
+
+
 def is_ack(text: str) -> bool:
     t = re.sub(r"[^\w\s]", "", text or "").strip()
     return bool(text and text.strip()) and "?" not in text and (not t or bool(_ACK_RE.match(re.sub(r"\s+", " ", t))))
@@ -416,7 +430,7 @@ def work_time(models: list[dict], caller: str) -> list[str]:
             if gap >= BREAK_MIN and mins(b) > s0 and mins(a) < s1:
                 breaks.append(f"{a:%H:%M}-{b:%H:%M} ({_hm(int(gap))})")
     active += (last - start).total_seconds() / 60
-    txt = f"Desk time (shift {SHIFT[0]}-{SHIFT[1]}): first action {first:%H:%M}, last {last:%H:%M}, active about {_hm(int(active))} of {_hm(s1 - s0)}."
+    txt = f"Desk time (shift {SHIFT[0]}-{SHIFT[1]}): first action {first:%H:%M}, last {last:%H:%M}, recorded activity about {_hm(int(active))} of {_hm(s1 - s0)} (from DataSift actions, not verified hours)."
     flags = []
     if mins(first) > s0 + 15:
         flags.append(f"started {_hm(mins(first) - s0)} late")
@@ -530,7 +544,7 @@ def build_audit(models: list[dict], day: str, caller: str, legacy: dict | None =
         if not m["attempt_bumps"]:
             continue
         dialed = {c["to"] for c in m["calls"] if c["by"] == caller and c["dir"] == "outbound"}
-        left = [n for n, p in m["phones"].items() if any(t in ("Dial First", "Dial Second") for t in p.get("tags") or []) and p.get("status") not in TERMINAL_MARKS and n not in dialed]
+        left = [n for n, p in m["phones"].items() if _eligible(p) and n not in dialed]
         if left:
             early_bump.append(f"{m['street']} (undialed ...{', ...'.join(n[-4:] for n in left)})")
     if early_bump:
@@ -548,13 +562,16 @@ def build_audit(models: list[dict], day: str, caller: str, legacy: dict | None =
             if (m["phones"].get(n) or {}).get("status") == "WRONG":
                 wrong_not_dnc.append(f"{m['street']} ...{n[-4:]}")
         # After-shift inbounds are tomorrow's work, not a miss today.
-        inbound = sorted(t for t in [c["ct"] for c in m["calls"] if c["dir"] == "inbound"] + [s["ct"] for s in m["sms_in"] if not is_ack(s["text"])]
+        # Sign-offs and STOPs need no reply; a STOP, or a text from a number already DNC, is handled by the responder.
+        inbound = sorted(t for t in [c["ct"] for c in m["calls"] if c["dir"] == "inbound"]
+                         + [s["ct"] for s in m["sms_in"] if not is_ack(s["text"]) and not is_stop(s["text"])
+                            and (m["phones"].get(s["from"]) or {}).get("status") not in DNC_MARKS]
                          if f"{t:%H:%M}" < SHIFT[1])
         if not inbound or m["notes"] or (m["open_tasks"] or 0) or any(x["by"] == caller and x["to"] not in (None, "prospecting") for x in m["status_changes"]):
             continue
         # A text or call back, or a phone mark (e.g. Wrong Number), from the caller after the last inbound counts as handled.
         replies = ([s["ct"] for s in m["sms_out"] if s["by"] == caller] + [c["ct"] for c in m["calls"] if c["by"] == caller and c["dir"] == "outbound"]
-                   + [x["ct"] for x in m["marks"] if x["by"] == caller])
+                   + [x["ct"] for x in m["marks"] if x["by"] == caller or x["to"] in DNC_MARKS])
         if any(r > inbound[-1] for r in replies):
             continue
         callbacks.append(f"{m['street']} ({len(inbound)} inbound, last {inbound[-1]:%H:%M})")
@@ -568,9 +585,10 @@ def build_audit(models: list[dict], day: str, caller: str, legacy: dict | None =
     statuses = Counter(s["to"] for m in models for s in m["status_changes"] if s["by"] == caller)
     out.append("Statuses set: " + (", ".join(f"{k}={v}" for k, v in statuses.most_common()) or "none") + f". Notes added: {sum(len(m['notes']) for m in models)}.")
     batch_idle = sorted(m["street"] for m in models if m["assigned_to"] == CALLER_USER_UUID and m["status"] == "prospecting"
-                        and any(str(t).startswith("Batch ") for t in m["tags"]) and not any(c["by"] == caller for c in m["calls"]))
+                        and any(str(t).startswith("Batch ") for t in m["tags"]) and not any(c["by"] == caller for c in m["calls"])
+                        and any(_eligible(p) for p in m["phones"].values()))
     if batch_idle:
-        out.append(f":warning: Batch records in Prospecting with no call today: " + "; ".join(batch_idle[:12]))
+        out.append(f":warning: Batch records in Prospecting with an eligible number and no call today: " + "; ".join(batch_idle[:12]))
     legacy = [(m, c) for m, c in dials if c["from"] == LEGACY_LINE]
     legacy_untagged = sorted({m["street"] for m, _ in legacy if not any(str(t).startswith(LEGACY_TAG_PREFIX) for t in m["tags"])})
     out.append(f"Legacy: {len(legacy)} calls from the legacy line on {len({m['uuid'] for m, _ in legacy})} records"
