@@ -460,22 +460,29 @@ def build_audit(models: list[dict], day: str, caller: str) -> str:
             if c["result"] == "answered" and (c["dur"] or 0) >= 45 and not m["notes"] and final_mark(m, c["to"], caller) != "NO_ANSWER"]
     if live:
         out.append(f":eyes: {len(live)} answered calls of 45s+ not marked No Answer and no note (possible conversation): " + "; ".join(f"{s} ...{n} {d}s" for s, n, d in live[:10]))
-    callbacks = []
+    callbacks, wrong_not_dnc = [], []
     for m in models:
         if "responder test" in m["street"].lower():
             continue
+        # A number that texted in and ends the day Wrong (not Wrong + DNC) can still be texted again.
+        for n in sorted({s["from"] for s in m["sms_in"]}):
+            if (m["phones"].get(n) or {}).get("status") == "WRONG":
+                wrong_not_dnc.append(f"{m['street']} ...{n[-4:]}")
         # After-shift inbounds are tomorrow's work, not a miss today.
         inbound = sorted(t for t in [c["ct"] for c in m["calls"] if c["dir"] == "inbound"] + [s["ct"] for s in m["sms_in"]]
                          if f"{t:%H:%M}" < SHIFT[1])
         if not inbound or m["notes"] or (m["open_tasks"] or 0) or any(x["by"] == caller and x["to"] not in (None, "prospecting") for x in m["status_changes"]):
             continue
-        # A text or call back from the caller after the last inbound counts as handled.
-        replies = [s["ct"] for s in m["sms_out"] if s["by"] == caller] + [c["ct"] for c in m["calls"] if c["by"] == caller and c["dir"] == "outbound"]
+        # A text or call back, or a phone mark (e.g. Wrong Number), from the caller after the last inbound counts as handled.
+        replies = ([s["ct"] for s in m["sms_out"] if s["by"] == caller] + [c["ct"] for c in m["calls"] if c["by"] == caller and c["dir"] == "outbound"]
+                   + [x["ct"] for x in m["marks"] if x["by"] == caller])
         if any(r > inbound[-1] for r in replies):
             continue
         callbacks.append(f"{m['street']} ({len(inbound)} inbound, last {inbound[-1]:%H:%M})")
     if callbacks:
-        out.append(f":warning: Inbound call/text with no reply, note or open task: " + "; ".join(callbacks[:10]))
+        out.append(f":warning: Inbound call/text with no reply, note, phone mark or open task: " + "; ".join(callbacks[:10]))
+    if wrong_not_dnc:
+        out.append(f":warning: Texted in, marked Wrong but not Wrong + DNC: " + "; ".join(wrong_not_dnc[:10]))
     vm_due = {(m["uuid"], c["to"]) for m, c in dials if c["result"] == "answered" and (c["dur"] or 0) >= MIN_VM_SECONDS and final_mark(m, c["to"], caller) == "NO_ANSWER"}
     pm_sent = sum(1 for m in models for s in m["sms_out"] if s["from"] in PM_LINES)
     out.append(f"Afternoon texts: {len(vm_due)} voicemail numbers, {pm_sent} texts sent from afternoon lines.")
