@@ -754,8 +754,10 @@ def run_am_start(args) -> int:
 
 
 # ----------------------------------------------------------- extra numbers
-# One confirmation text, ever, to each extra mobile on a prospecting record. Calls and the drip stay on #1/#2.
+# A confirmation text to each extra mobile on a prospecting record, plus one follow-up on a later day
+# if it never replied. Calls and the drip stay on #1/#2.
 EXTRA_TEMPLATE = "Hi, trying to reach {first} about {street}. Is this still a good number? - Britney"
+EXTRA_FOLLOWUP_TEMPLATE = "Following up: is this {first}'s number? It's about {street}. - Britney"
 SMS_LINE_NUMBERS = {"SMS Line A": "8162545235", "SMS Line B": "8169553316", "SMS Line C": "8167889952"}
 EXTRA_TAGS = ("Dial First", "Dial Second", "Dial Third", "Dial Fourth")
 EXTRA_OK_MARKS = {"", "UNKNOWN", "NO_ANSWER"}
@@ -766,8 +768,10 @@ def _d10(x) -> str:
     return re.sub(r"\D", "", str(x or ""))[-10:]
 
 
-def extra_numbers(det: dict, texted: set[str], ledger: set[str]) -> tuple[list[str], list[tuple[str, str]]]:
-    """(numbers to text, [(number, why skipped)]) for one property detail. texted = numbers seen in its SMS logs."""
+def extra_numbers(det: dict, history: dict[str, dict], ledger: dict, today) -> tuple[list[tuple[str, int]], list[tuple[str, str]]]:
+    """([(number, stage)], [(number, why skipped)]) for one property detail.
+    history = {number: {"sent": [(Central date, from line or None)], "replied": bool}} from its SMS logs.
+    Stage 1 = never texted. Stage 2 = exactly one earlier text, from an SMS Line, on a past day, no reply."""
     owner = det.get("owner") or {}
     primary = owner.get("primary_phone")
     primary_num = _d10(primary.get("number") if isinstance(primary, dict) else primary)
@@ -777,24 +781,35 @@ def extra_numbers(det: dict, texted: set[str], ledger: set[str]) -> tuple[list[s
         if not n or n == primary_num:
             continue
         tags = ph.get("tags") or []
-        why = None
+        h = history.get(n) or {"sent": [], "replied": False}
+        led = ledger.get(n) or {}
+        why, stage = None, None
         if not any(t in tags for t in EXTRA_TAGS):
             why = "not Dial First-Fourth"
         elif ph.get("type") != "MOBILE":
             why = f"type {ph.get('type')}"
         elif (ph.get("status") or "").upper() not in EXTRA_OK_MARKS:
             why = f"marked {ph.get('status')}"
-        elif n in texted:
+        elif h["replied"]:
+            why = "replied"
+        elif not h["sent"]:
+            # DataSift can lag on API sends; the local ledger covers a same-day rerun.
+            why, stage = ("already sent a confirmation text", None) if led else (None, 1)
+        elif len(h["sent"]) > 1 or led.get("stage") == 2:
+            why = "already followed up"
+        elif h["sent"][0][1] is None:
             why = "already has SMS history"
-        elif n in ledger:
-            why = "already sent a confirmation text"
-        (skip.append((n, why)) if why else send.append(n))
+        elif h["sent"][0][0] >= today:
+            why = "first text was today"
+        else:
+            stage = 2
+        (skip.append((n, why)) if why else send.append((n, stage)))
     return send, skip
 
 
-def plan_extra_texts(api: Sift, prior_line_counts: Counter | None = None, ledger: set[str] | None = None) -> tuple[list[dict], list[dict], dict]:
+def plan_extra_texts(api: Sift, prior_line_counts: Counter | None = None, ledger: dict | None = None) -> tuple[list[dict], list[dict], dict]:
     """Every extra number to text on prospecting records assigned to the caller: (planned, skipped, texts already sent today per line)."""
-    ledger = ledger or set()
+    ledger = ledger or {}
     today = ct_now().date()
     line_of = {v: k for k, v in SMS_LINE_NUMBERS.items()}
     # Pass 1: every prospecting record's detail + logs, and today's outbound texts per line from
@@ -833,27 +848,32 @@ def plan_extra_texts(api: Sift, prior_line_counts: Counter | None = None, ledger
         if why:
             skipped.append({**base, "number": None, "why": why})
             continue
-        texted, started = set(), None
+        history, started = {}, None
         for e in evs:
             sms = (e.get("payload") or {}).get("sms") or {}
-            if e.get("event_type") in ("owner.sms.sent", "owner.sms.received"):
-                texted |= {_d10(sms.get("origin_number")), _d10(sms.get("destination_number"))}
+            if e.get("event_type") == "owner.sms.sent":
+                t = to_ct(e.get("timestamp", ""))
+                h = history.setdefault(_d10(sms.get("destination_number")), {"sent": [], "replied": False})
+                h["sent"].append((t.date() if t else today, line_of.get(_d10(sms.get("origin_number")))))
+            elif e.get("event_type") == "owner.sms.received":
+                history.setdefault(_d10(sms.get("origin_number")), {"sent": [], "replied": False})["replied"] = True
             if e.get("event_type") == "property.status.updated":
                 to = (((e.get("payload") or {}).get("property") or {}).get("status") or [None, None])[-1]
                 t = to_ct(e.get("timestamp", ""))
                 if to == "prospecting" and t and (started is None or t > started):
                     started = t
         base["started"] = started.date().isoformat() if started else None
-        send, skip = extra_numbers(det, texted, ledger)
+        send, skip = extra_numbers(det, history, ledger, today)
         for n, w in skip:
             skipped.append({**base, "number": n, "why": w})
-        for n in send:
+        for n, stage in send:
             if per_line[base["line"]] >= MAX_PER_LINE:
                 skipped.append({**base, "number": n, "why": f"{base['line']} hit {MAX_PER_LINE} today"})
                 continue
             per_line[base["line"]] += 1
-            planned.append({**base, "number": n, "from": SMS_LINE_NUMBERS[base["line"]],
-                            "message": EXTRA_TEMPLATE.format(first=first.title(), street=street.title())})
+            tpl = EXTRA_TEMPLATE if stage == 1 else EXTRA_FOLLOWUP_TEMPLATE
+            planned.append({**base, "number": n, "stage": stage, "from": SMS_LINE_NUMBERS[base["line"]],
+                            "message": tpl.format(first=first.title(), street=street.title())})
     return planned, skipped, prior_totals
 
 
@@ -867,13 +887,14 @@ def run_extra_texts(args) -> int:
     state_file = STATE_DIR / f"extra_texts_{day}.json"
     prior = json.loads(state_file.read_text(encoding="utf-8")).get("results", []) if state_file.exists() else []
     ledger = json.loads(EXTRA_LEDGER.read_text(encoding="utf-8")) if EXTRA_LEDGER.exists() else {}
-    planned, skipped, already = plan_extra_texts(api, Counter(r["line"] for r in prior if r.get("ok")), set(ledger))
+    planned, skipped, already = plan_extra_texts(api, Counter(r["line"] for r in prior if r.get("ok")), ledger)
     by_line = Counter(p["line"] for p in planned)
-    lines = [f"Extra-number texts for {day} ({'LIVE' if live else 'DRY RUN'}): {len(planned)} planned, {len(skipped)} skipped"]
+    n2 = sum(p["stage"] == 2 for p in planned)
+    lines = [f"Extra-number texts for {day} ({'LIVE' if live else 'DRY RUN'}): {len(planned)} planned ({len(planned) - n2} first, {n2} follow-up), {len(skipped)} skipped"]
     for k in SMS_LINE_NUMBERS:
         lines.append(f"  {k}: {already.get(k, 0)} already sent today + {by_line[k]} planned = {already.get(k, 0) + by_line[k]}/{MAX_PER_LINE}")
     for p in planned:
-        lines.append(f"  TEXT {p['street']} | {p['owner_first']} | ...{p['number'][-4:]} from {p['line']}")
+        lines.append(f"  DAY {p['stage']} {p['street']} | {p['owner_first']} | ...{p['number'][-4:]} from {p['line']}")
     results = []
     if live and planned:
         token = _env("SMRTPHONE_API_TOKEN") or sys.exit("SMRTPHONE_API_TOKEN missing")
@@ -881,7 +902,7 @@ def run_extra_texts(args) -> int:
             ok, resp = send_sms(token, p["from"], p["number"], p["message"])
             results.append({**p, "ok": ok, "resp": resp})
             if ok:
-                ledger[p["number"]] = {"day": day, "uuid": p["uuid"], "line": p["line"]}
+                ledger[p["number"]] = {"day": day, "uuid": p["uuid"], "line": p["line"], "stage": p["stage"]}
             time.sleep(2)
         fails = [r for r in results if not r["ok"]]
         lines.append(f"Sent {len(results) - len(fails)}; failed {len(fails)}" + "".join(f"\n  FAILED ...{r['number'][-4:]}: {r['resp']}" for r in fails))
