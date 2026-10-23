@@ -59,6 +59,20 @@ jobs:
           ARGS=""
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="--dry-run"; fi
           python src/drip_exit_guard.py $ARGS
+      # Line volume watch (added 2026-10-23): alerts Google Chat + Slack when any of our SMS lines
+      # passes 20 texts today (then every 5 more), to keep lines under carrier spam flags. Counts
+      # from DataSift's owner.sms.sent log, so drip, manual and API texts all count. No saved state:
+      # it only alerts on thresholds crossed in the last 5 minutes, matching the dispatcher cadence.
+      - name: Line volume watch
+        if: always()
+        env:
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GOOGLE_CHAT_WEBHOOK_URL: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="--no-post"; fi
+          python src/pm_text_sender.py line-watch $ARGS
       - uses: actions/upload-artifact@v4
         if: always()
         with:

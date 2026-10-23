@@ -21,9 +21,10 @@ Modes
     python src/pm_text_sender.py pm-texts --send     # send for real
     python src/pm_text_sender.py pm-texts --day 2026-10-19   # backtest a past day (dry run only)
     python src/pm_text_sender.py audit               # end-of-day checklist (stdout + Slack if webhook set)
+    python src/pm_text_sender.py line-watch          # alert when a line crosses 20 texts today
 
-Env: REISIFT_API_KEY, SMRTPHONE_API_TOKEN (pm-texts --send), SLACK_WEBHOOK_URL
-(optional). Caller/lines are constants below; change them there when the
+Env: REISIFT_API_KEY, SMRTPHONE_API_TOKEN (pm-texts --send), SLACK_WEBHOOK_URL,
+GOOGLE_CHAT_WEBHOOK_URL (line-watch) (optional). Caller/lines are constants below; change them there when the
 roster changes.
 
 Safety rules baked in: never texts a number marked Correct/Wrong/Dead/DNC, an
@@ -63,7 +64,7 @@ CALLBACK_LINE = "8169553574"
 LEGACY_LINES = {"8167889386", "4057641708", "5055201714"}
 LEGACY_TEXT_CAP = 20
 LEGACY_TAG_PREFIX = "Legacy Recall"
-MAX_PER_LINE = 25
+MAX_PER_LINE = 20
 MIN_VM_SECONDS = 20
 SHIFT = ("10:00", "19:00")   # Rahaf's agreed shift, Central (Kaycie, 2026-10-21)
 DIAL_FLOOR = 150             # daily dial floor (rahaf-kpi-scorecard production standards)
@@ -647,7 +648,7 @@ def run_audit(args) -> int:
 # ----------------------------------------------------------------- am start
 PRESET_01_TITLE = "01. New - Set to Prospecting"
 SMS_LINE_TAGS = ("SMS Line A", "SMS Line B", "SMS Line C")
-MAX_NEW_PER_LINE = 25
+MAX_NEW_PER_LINE = 20
 
 
 def _preset_must(api: Sift, title_prefix: str) -> dict:
@@ -945,6 +946,106 @@ def _slack(text: str, chunk: int = 3500) -> None:
     print(f"(posted to Slack in {len(parts)} message(s))")
 
 
+# ----------------------------------------------------------------- line watch
+# Every smrtPhone number we text from. line-watch counts today's sends per line and
+# alerts once when a line crosses 20 (then again at 25, 30, ...) so nobody keeps
+# texting from it and risks the carrier spam flag.
+OUR_LINES = {
+    "8162545235", "8169553316", "8167889952", "8166084051", "8167100226",
+    "8167100554", "8167889485", "8167595422", "8167100448", "8167100146",
+    "8169553574", "8167889386", "5054941645", "4057641708", "5055201714",
+}
+LINE_ALERT_AT = 20
+LINE_ALERT_STEP = 5
+
+
+def fmt_phone(n) -> str:
+    d = _d10(n)
+    return f"({d[:3]}) {d[3:6]}-{d[6:]}" if len(d) == 10 else str(n)
+
+
+def line_crossings(before: int, now: int, threshold: int = LINE_ALERT_AT, step: int = LINE_ALERT_STEP) -> list[int]:
+    """Thresholds (20, 25, 30, ...) passed going from `before` to `now`, i.e. in (before, now]."""
+    out, t = [], threshold
+    while t <= now:
+        if t > before:
+            out.append(t)
+        t += step
+    return out
+
+
+def count_sent_by_line(sift: Sift, day: dt.date, cutoff: dt.datetime) -> tuple[Counter, Counter]:
+    """Today's (Central) owner.sms.sent counts per line, overall and up to `cutoff` (Central)."""
+    total, upto = Counter(), Counter()
+    path = "/api/internal/property/logs/?limit=100"
+    for _ in range(500):
+        r = sift.call(path)
+        rows = r.get("results") or []
+        older = False
+        for e in rows:
+            t = to_ct(e.get("timestamp"))
+            if t is None:
+                continue
+            if t.date() < day:
+                older = True
+                continue
+            if t.date() > day or e.get("event_type") != "owner.sms.sent":
+                continue
+            line = _d10(((e.get("payload") or {}).get("sms") or {}).get("origin_number"))
+            if line not in OUR_LINES:
+                continue
+            total[line] += 1
+            if t.replace(tzinfo=None) <= cutoff.replace(tzinfo=None):
+                upto[line] += 1
+        cur = r.get("next_cursor")
+        if older or not cur or not rows:
+            break
+        path = "/api/internal/property/logs/?limit=100&cursor=" + urllib.parse.quote(str(cur))
+    return total, upto
+
+
+def _google_chat(text: str) -> None:
+    url = _env("GOOGLE_CHAT_WEBHOOK_URL")
+    if not url:
+        print("(no GOOGLE_CHAT_WEBHOOK_URL; not posted)")
+        return
+    req = urllib.request.Request(url, data=json.dumps({"text": text}).encode(),
+                                 headers={"content-type": "application/json; charset=UTF-8"})
+    try:
+        urllib.request.urlopen(req, timeout=20).read()
+        print("(posted to Google Chat)")
+    except Exception as e:  # noqa: BLE001
+        print(f"(Google Chat post failed: {e})")
+
+
+def run_line_watch(args) -> int:
+    now = ct_now()
+    if args.day:
+        day = dt.date.fromisoformat(args.day)
+        now = dt.datetime.combine(day, dt.time(23, 59, 59), tzinfo=now.tzinfo)
+        cutoff = dt.datetime.combine(day, dt.time(0, 0), tzinfo=now.tzinfo)   # backtest: every crossing that day
+    else:
+        day = now.date()
+        cutoff = now - dt.timedelta(minutes=args.window_min)
+    api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
+    total, upto = count_sent_by_line(api, day, cutoff)
+    print(f"Texts sent today ({day}) by line:")
+    for line, n in total.most_common():
+        print(f"  {fmt_phone(line)}  {n}")
+    if not total:
+        print("  (none)")
+    alerts = []
+    for line, n in total.most_common():
+        for t in line_crossings(upto[line], n, args.threshold, LINE_ALERT_STEP):
+            alerts.append(f"Line {fmt_phone(line)} has sent {t} texts today — stop texting from it.")
+    for a in alerts:
+        print("ALERT: " + a)
+        if not args.no_post:
+            _google_chat(a)
+            _slack(a)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="mode", required=True)
@@ -972,6 +1073,12 @@ def main() -> int:
     x.add_argument("--slack", action="store_true")
     x.add_argument("--only-between", help="Central window like 10:30-12:00")
     x.set_defaults(fn=run_extra_texts)
+    w = sub.add_parser("line-watch", help="alert Google Chat + Slack when a line sends 20 texts in a day")
+    w.add_argument("--day", help="YYYY-MM-DD to backtest (reports every crossing that day)")
+    w.add_argument("--window-min", type=int, default=5, help="only alert on crossings in the last N minutes")
+    w.add_argument("--threshold", type=int, default=LINE_ALERT_AT)
+    w.add_argument("--no-post", action="store_true", help="print only, don't post")
+    w.set_defaults(fn=run_line_watch)
     args = ap.parse_args()
     return args.fn(args)
 

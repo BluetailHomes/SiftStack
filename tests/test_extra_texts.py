@@ -173,23 +173,23 @@ def test_follow_up_from_logs():
 
 
 def test_line_cap_counts_texts_already_sent_today():
-    # 24 texts already went out from Line A today on another record; only one more fits.
+    # 19 texts already went out from Line A today on another record; only one more fits.
     sent = [{
         "event_type": "owner.sms.sent",
         "timestamp": "2026-10-22 15:00:00",
         "payload": {"sms": {"origin_number": LINE_A, "destination_number": f"81655590{i:02d}"}},
-    } for i in range(24)]
+    } for i in range(19)]
     dets = {"busy": _det([], assigned_to="someone-else"),
             "p1": _det([_phone("8165550003"), _phone("8165550004")])}
     planned, skipped, prior = _plan(_api(dets, {"busy": sent}))
-    assert prior["SMS Line A"] == 24
+    assert prior["SMS Line A"] == 19
     assert [p["number"] for p in planned] == ["8165550003"]
-    assert skipped[-1]["why"] == "SMS Line A hit 25 today"
+    assert skipped[-1]["why"] == "SMS Line A hit 20 today"
 
 
 def test_line_cap_uses_prior_line_counts_when_higher():
     planned, skipped, prior = _plan(_api({"p1": _det([_phone(EXTRA)])}),
-                                    prior_line_counts=Counter({"SMS Line A": 25}))
-    assert prior["SMS Line A"] == 25
+                                    prior_line_counts=Counter({"SMS Line A": 20}))
+    assert prior["SMS Line A"] == 20
     assert planned == []
-    assert skipped[0]["why"] == "SMS Line A hit 25 today"
+    assert skipped[0]["why"] == "SMS Line A hit 20 today"

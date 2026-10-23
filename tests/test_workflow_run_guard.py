@@ -145,10 +145,10 @@ def _model(n: int) -> dict:
 
 
 def test_pm_text_line_cap_counts_earlier_sends():
-    """Earlier today: line 0 sent 24, line 1 sent 25, line 2 sent 20. Ten more voicemails:
+    """Earlier today: line 0 sent 19, line 1 sent 20, line 2 sent 15. Ten more voicemails:
     1 fits on line 0, none on line 1, 5 on line 2, the other 4 are overflow (reported, never sent)."""
     lines = pm_text_sender.PM_LINES
-    prior = Counter({lines[0]: 24, lines[1]: 25, lines[2]: 20})
+    prior = Counter({lines[0]: 19, lines[1]: 20, lines[2]: 15})
     to_send, skipped = pm_text_sender.plan_pm_texts([_model(i) for i in range(10)], DAY, "rahaf", set(), prior)
     assert not skipped and len(to_send) == 10
     used = Counter(e["line"] for e in to_send if not e["overflow"])
