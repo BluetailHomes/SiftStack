@@ -845,6 +845,8 @@ def plan_extra_texts(api: Sift, prior_line_counts: Counter | None = None, ledger
             why = f"needs exactly one SMS Line tag (has {len(lines)})"
         elif owner.get("dnc") or owner.get("opt_out"):
             why = "owner DNC/opt-out"
+        elif any((ph.get("status") or "").upper() in ("CORRECT", "CORRECT_DNC") for ph in owner.get("phones") or []):
+            why = "owner's number already confirmed Correct"
         if why:
             skipped.append({**base, "number": None, "why": why})
             continue
