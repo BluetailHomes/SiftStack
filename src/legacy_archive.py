@@ -413,6 +413,10 @@ PRESET_GROUPS = {"KC": ["Jackson", "Clay", "Platte", "Cass", "Knox"],
                  "OK": ["Oklahoma", "Tulsa"],
                  "NM": ["Bernalillo", "Sandoval"]}
 RECALL_TAG = "Legacy Recall 2026-10"
+# KC's Jackson Not Interested records are worked from P1 preset 06, so KC 02 leaves
+# not_interested out; 04 KC picks up the non-Jackson ones that would otherwise be unrouted
+KC_02_TIER = [s for s in TIER_02 if s != "not_interested"]
+KC_NI_COUNTIES = ["Clay", "Platte", "Cass", "Knox"]
 
 
 def phase_presets(ctx: Ctx):
@@ -432,10 +436,13 @@ def phase_presets(ctx: Ctx):
     recall = ctx.ensure_tag(RECALL_TAG) if ctx.commit else ctx.tags.get(RECALL_TAG)
     presets = []
     for g, counties in PRESET_GROUPS.items():
-        for title, extra in ((f"01 {g} – Call Now", {"any_property_status": TIER_01}),
-                             (f"02 {g} – Nurture", {"any_property_status": TIER_02}),
-                             (f"03 {g} – Exhausted", None)):
-            must = {"all_tags": [eng], "any_county": counties, "must_not": {}}
+        specs = [(f"01 {g} – Call Now", counties, {"any_property_status": TIER_01}),
+                 (f"02 {g} – Nurture", counties, {"any_property_status": KC_02_TIER if g == "KC" else TIER_02}),
+                 (f"03 {g} – Exhausted", counties, None)]
+        if g == "KC":
+            specs.append((f"04 {g} – Not Interested", KC_NI_COUNTIES, {"any_property_status": ["not_interested"]}))
+        for title, cos, extra in specs:
+            must = {"all_tags": [eng], "any_county": cos, "dnc": 0, "opt_out": 0, "must_not": {}}
             if recall:
                 must["must_not"]["any_tags"] = [recall]
             if extra:
