@@ -1321,61 +1321,39 @@ def _batch_tracerfy_lookup(notices: list) -> None:
 
         logger.info("  Tracerfy batch job %s submitted (%d records)", queue_id, len(lookup_map))
 
-        # Poll for results — batch jobs take longer
-        # GET /queue/:id may return a list (records) or dict (status wrapper)
-        for _attempt in range(30):
-            time.sleep(5)
-            result_resp = requests.get(
-                f"https://tracerfy.com/v1/api/queue/{queue_id}",
-                headers={"Authorization": f"Bearer {cfg.TRACERFY_API_KEY}"},
-                timeout=15,
-            )
-            result_resp.raise_for_status()
-            result_data = result_resp.json()
-
-            # Handle both response formats
-            if isinstance(result_data, list):
-                records = result_data
-            elif isinstance(result_data, dict):
-                status = result_data.get("status", "")
-                if status == "failed":
-                    logger.warning("Tracerfy batch job %s failed", queue_id)
-                    return
-                if status != "completed":
-                    continue  # still pending
-                records = result_data.get("records", [])
-            else:
-                continue
-
-            matched = 0
-            for rec in records:
-                if not isinstance(rec, dict):
-                    continue
-                street = (rec.get("mail_address") or "").strip()
-                if not street:
-                    continue
-                # Match back to notice by first+last name
-                rec_first = (rec.get("first_name") or "").strip().lower()
-                rec_last = (rec.get("last_name") or "").strip().lower()
-                for notice, first, last in lookup_map:
-                    if (first.lower() == rec_first
-                            and last.lower() == rec_last
-                            and not notice.decision_maker_street):
-                        notice.decision_maker_street = street
-                        notice.decision_maker_city = (rec.get("mail_city") or "").strip()
-                        notice.decision_maker_state = (rec.get("mail_state") or notice.state).strip()
-                        notice.decision_maker_zip = (rec.get("mail_zip") or "").strip()
-                        matched += 1
-                        logger.info(
-                            "    Tracerfy batch: %s -> %s, %s %s",
-                            notice.decision_maker_name, street,
-                            notice.decision_maker_city, notice.decision_maker_state,
-                        )
-                        break
-            logger.info("  Tracerfy batch complete: %d/%d matched", matched, len(lookup_map))
+        # Queue results grow while the job runs; wait for the count to settle
+        from tracerfy_skip_tracer import poll_queue_until_stable
+        records = poll_queue_until_stable(queue_id, max_wait=150)
+        if records is None:
             return
 
-        logger.warning("Tracerfy batch job %s timed out after 150s", queue_id)
+        matched = 0
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            street = (rec.get("mail_address") or "").strip()
+            if not street:
+                continue
+            # Match back to notice by first+last name
+            rec_first = (rec.get("first_name") or "").strip().lower()
+            rec_last = (rec.get("last_name") or "").strip().lower()
+            for notice, first, last in lookup_map:
+                if (first.lower() == rec_first
+                        and last.lower() == rec_last
+                        and not notice.decision_maker_street):
+                    notice.decision_maker_street = street
+                    notice.decision_maker_city = (rec.get("mail_city") or "").strip()
+                    notice.decision_maker_state = (rec.get("mail_state") or notice.state).strip()
+                    notice.decision_maker_zip = (rec.get("mail_zip") or "").strip()
+                    matched += 1
+                    logger.info(
+                        "    Tracerfy batch: %s -> %s, %s %s",
+                        notice.decision_maker_name, street,
+                        notice.decision_maker_city, notice.decision_maker_state,
+                    )
+                    break
+        logger.info("  Tracerfy batch complete: %d/%d matched", matched, len(lookup_map))
+        return
     except Exception as e:
         logger.warning("Tracerfy batch lookup failed: %s", e)
 

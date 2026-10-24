@@ -186,6 +186,81 @@ def _lookup_missing_heir_addresses(
     return filled
 
 
+def poll_queue_until_stable(
+    queue_id,
+    est_wait=None,
+    interval: int = 5,
+    max_wait: int = 300,
+    stable_polls: int = 3,
+) -> list | None:
+    """Poll a Tracerfy queue until its result list stops growing.
+
+    The queue endpoint returns a partial list while the job is still running
+    (one real run returned 31 records on the first poll and 187 once settled),
+    so the first non-empty list can't be trusted. Accept only after the count
+    is unchanged for `stable_polls` polls in a row and the estimated wait has
+    passed. Returns the records, the last records seen on timeout, or None
+    if the job failed or nothing came back.
+    """
+    try:
+        min_wait = float(est_wait)
+    except (TypeError, ValueError):
+        min_wait = 0.0
+    min_wait = min(min_wait, max_wait)
+
+    url = f"{TRACERFY_QUEUE_URL}{queue_id}"
+    headers = {"Authorization": f"Bearer {cfg.TRACERFY_API_KEY}"}
+    last_records: list | None = None
+    unchanged = 0
+    polls = 0
+
+    while polls * interval < max_wait:
+        time.sleep(interval)
+        polls += 1
+        elapsed = polls * interval
+
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if isinstance(data, dict):
+            status = data.get("status", "")
+            if status == "failed":
+                logger.error("  Tracerfy job %s failed", queue_id)
+                return None
+            if status != "completed":
+                continue
+            records = data.get("records", []) or []
+        elif isinstance(data, list):
+            records = data
+        else:
+            continue
+
+        if not records:
+            continue
+
+        if last_records is not None and len(records) == len(last_records):
+            unchanged += 1
+        else:
+            unchanged = 0
+            if last_records is not None:
+                logger.info("  Tracerfy queue %s: %d records so far (%ds)",
+                            queue_id, len(records), elapsed)
+        last_records = records
+
+        if unchanged >= stable_polls - 1 and elapsed >= min_wait:
+            logger.info("  Tracerfy queue %s settled at %d records after %ds",
+                        queue_id, len(records), elapsed)
+            return records
+
+    if last_records:
+        logger.warning("  Tracerfy queue %s still changing after %ds; using last %d records",
+                       queue_id, max_wait, len(last_records))
+        return last_records
+    logger.warning("  Tracerfy job timed out after %ds", max_wait)
+    return None
+
+
 def batch_skip_trace(
     notices: list[NoticeData],
     max_signing_traces: int = 5,
@@ -334,44 +409,16 @@ def batch_skip_trace(
         est_wait = queue_data.get("estimated_wait_seconds", "unknown")
         logger.info("  Tracerfy batch job %s submitted (est. %ss)", queue_id, est_wait)
 
-        # Poll for results (up to 5 minutes)
-        for attempt in range(60):
-            time.sleep(5)
-            result_resp = requests.get(
-                f"{TRACERFY_QUEUE_URL}{queue_id}",
-                headers={"Authorization": f"Bearer {cfg.TRACERFY_API_KEY}"},
-                timeout=15,
-            )
-            result_resp.raise_for_status()
-            result_data = result_resp.json()
-
-            # Handle both response formats
-            if isinstance(result_data, list):
-                records = result_data
-            elif isinstance(result_data, dict):
-                status = result_data.get("status", "")
-                if status == "failed":
-                    logger.warning("Tracerfy batch job %s failed", queue_id)
-                    return stats
-                if status != "completed":
-                    if attempt % 6 == 5:
-                        logger.info("  Tracerfy batch still processing (%ds)...",
-                                    (attempt + 1) * 5)
-                    continue
-                records = result_data.get("records", [])
-            else:
-                continue
-
-            # Match results back to notices
-            _match_results(records, lookup_map, stats)
-            stats["cost"] = stats["submitted"] * 0.02
-            logger.info("  Tracerfy batch complete: %d/%d matched, %d phones, %d emails, $%.2f",
-                        stats["matched"], stats["submitted"],
-                        stats["phones_found"], stats["emails_found"], stats["cost"])
+        records = poll_queue_until_stable(queue_id, est_wait=est_wait, max_wait=300)
+        stats["cost"] = stats["submitted"] * 0.02  # Charged even on failure/timeout
+        if records is None:
             return stats
 
-        logger.warning("Tracerfy batch job %s timed out after 5 min", queue_id)
-        stats["cost"] = stats["submitted"] * 0.02  # Still charged
+        # Match results back to notices
+        _match_results(records, lookup_map, stats)
+        logger.info("  Tracerfy batch complete: %d/%d matched, %d phones, %d emails, $%.2f",
+                    stats["matched"], stats["submitted"],
+                    stats["phones_found"], stats["emails_found"], stats["cost"])
         return stats
 
     except Exception as e:
