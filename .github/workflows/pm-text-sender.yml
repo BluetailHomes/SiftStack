@@ -93,6 +93,12 @@ jobs:
           if [ "$LIVE" = "true" ]; then ARGS="$ARGS --send"; fi
           if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 09:40-12:00"; fi
           python src/pm_text_sender.py $ARGS
+      - name: One-off Mon 2026-10-26 re-enroll of 3 records (self-gated to 09:45-10:30 Central that day; remove after)
+        if: always()
+        env:
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python scripts/reenroll_monday_2026-10-26.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
