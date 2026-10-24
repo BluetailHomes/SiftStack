@@ -45,6 +45,7 @@ OUT_DIR = Path(__file__).resolve().parent.parent / "output" / "auto_responder"
 # Lines Bluetail owns. Inbound texts that originate from one of these are our own tests.
 DEFAULT_OUR_LINES = {
     "8162545235", "8169553316", "8167889952",            # morning-text lines A/B/C
+    "8168971724", "8168971637",                          # morning-text lines D/E
     "8166084051", "8167100226", "8167100554",            # afternoon-text lines
     "8167889485", "8167595422", "8167100448", "8167100146",  # call lines
     "8169553574", "8167889386", "5054941645",

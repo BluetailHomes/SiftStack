@@ -9,7 +9,7 @@ name: PM Text Sender + Caller Audit
 #             (Settings -> Secrets and variables -> Actions -> Variables).
 #             Second step: extra-number confirmation texts (one text, then one
 #             follow-up on a later day if no reply, to each mobile beyond #1/#2,
-#             from SMS Line A/B/C). Its own dry-run
+#             from SMS Line A-E). Its own dry-run
 #             switch: repo variable EXTRA_TEXTS_LIVE = "true".
 #   audit     7:15 PM Central, Mon-Fri. Posts the end-of-day caller checklist
 #             (unmarked numbers, line caps, missed callbacks, legacy tagging) to Slack.

@@ -57,7 +57,7 @@ CALLER_EMAIL = "rahaf@bluetailhomes.com"
 CALLER_USER_UUID = "7cf06756-3bca-41be-9c02-ccc27b954007"
 PM_LINES = ["8166084051", "8167100226", "8167100554"]          # afternoon voicemail texts
 CALL_LINES = {"8167889485", "8167595422", "8167100448", "8167100146"}
-DRIP_LINES = {"8162545235", "8169553316", "8167889952"}
+DRIP_LINES = {"8162545235", "8169553316", "8167889952", "8168971724", "8168971637"}
 CALLBACK_LINE = "8169553574"
 # Legacy follow-up lines: KC (816) 788-9386, OK (405) 764-1708, NM (505) 520-1714.
 # Each lead is called, voicemailed and texted from its own market's line.
@@ -647,7 +647,7 @@ def run_audit(args) -> int:
 
 # ----------------------------------------------------------------- am start
 PRESET_01_TITLE = "01. New - Set to Prospecting"
-SMS_LINE_TAGS = ("SMS Line A", "SMS Line B", "SMS Line C")
+SMS_LINE_TAGS = ("SMS Line A", "SMS Line B", "SMS Line C", "SMS Line D", "SMS Line E")
 MAX_NEW_PER_LINE = 20
 
 
@@ -759,7 +759,8 @@ def run_am_start(args) -> int:
 # if it never replied. Calls and the drip stay on #1/#2.
 EXTRA_TEMPLATE = "Hi, trying to reach {first} about {street}. Is this still a good number? - Britney"
 EXTRA_FOLLOWUP_TEMPLATE = "Following up: is this {first}'s number? It's about {street}. - Britney"
-SMS_LINE_NUMBERS = {"SMS Line A": "8162545235", "SMS Line B": "8169553316", "SMS Line C": "8167889952"}
+SMS_LINE_NUMBERS = {"SMS Line A": "8162545235", "SMS Line B": "8169553316", "SMS Line C": "8167889952",
+                    "SMS Line D": "8168971724", "SMS Line E": "8168971637"}
 EXTRA_TAGS = ("Dial First", "Dial Second", "Dial Third", "Dial Fourth")
 EXTRA_OK_MARKS = {"", "UNKNOWN", "NO_ANSWER"}
 EXTRA_LEDGER = STATE_DIR / "extra_texts_sent.json"
@@ -954,6 +955,7 @@ OUR_LINES = {
     "8162545235", "8169553316", "8167889952", "8166084051", "8167100226",
     "8167100554", "8167889485", "8167595422", "8167100448", "8167100146",
     "8169553574", "8167889386", "5054941645", "4057641708", "5055201714",
+    "8168971724", "8168971637",
 }
 LINE_ALERT_AT = 20
 LINE_ALERT_STEP = 5
