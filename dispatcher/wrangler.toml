@@ -26,11 +26,14 @@ GITHUB_REF = "main"
 # Workers Free plan allows only 5 cron triggers per account. src/index.js checks
 # the Central clock and the wrong-hour firing is a no-op.
 crons = [
-  "50 14,15 * * 1-5",  # 09:50 Central am-start (14:50 UTC in CDT, 15:50 UTC in CST)
-  "30 21,22 * * 1-5",  # 16:30 Central pm-texts
-  "15 0,1 * * 2-6",    # 19:15 Central audit (next UTC day, hence Tue-Sat)
+  # Day NAMES, not numbers: Cloudflare counts 1 = Sunday (not 0 = Sunday like GitHub),
+  # so "1-5" meant Sun-Thu and every Friday run was skipped until 2026-10-25.
+  "50 14,15 * * MON-FRI",  # 09:50 Central am-start (14:50 UTC in CDT, 15:50 UTC in CST)
+  "30 21,22 * * MON-FRI",  # 16:30 Central pm-texts
+  "15 0,1 * * TUE-SAT",    # 19:15 Central audit (already the next day in UTC, so Mon-Fri evenings = Tue-Sat UTC)
   "*/5 * * * *",       # sms-responder poll; src/index.js limits it to 07:00-22:59 Central, every day
-]
+  "0 0,23 * * SUN,MON",  # 18:00 Central Sunday weekly-topup (23:00 UTC Sun in CDT, 00:00 UTC Mon in CST)
+]                      # 5 of 5 free-plan cron triggers used
 
 [observability]
 enabled = true

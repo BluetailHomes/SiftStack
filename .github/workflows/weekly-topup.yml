@@ -1,0 +1,68 @@
+name: Weekly Top-up
+
+# Sunday-evening top-up of Rahaf's Jackson Priority 1 queue for the coming
+# Monday (see src/weekly_topup.py): picks the next records in doors-per-deal
+# order, assigns them to Rahaf, tags them "Batch YYYY-MM-DD" (the Monday) plus
+# one SMS Line A-E tag each (even round-robin), sets each owner's primary phone
+# to the best Dial First/Second mobile, tags records with no usable phone
+# "Mail Only", and points presets 01/02 at the new Batch tag. It never sets a
+# status: am-start does that Monday 9:50 AM Central.
+#
+# DRY RUN by default: nothing is written until the repo variable TOPUP_LIVE is
+# set to "true" (Settings -> Secrets and variables -> Actions -> Variables).
+#
+# Triggered by the Cloudflare Worker in dispatcher/ (siftstack-dispatcher)
+# Sundays 6:00 PM Central with gate=true, which limits it to 18:00-20:00
+# Central. No GitHub `schedule:` cron, since GitHub ran crons hours late.
+#
+# No once-per-day guard step: src/workflow_run_guard.py is built for
+# pm-text-sender.yml only. A second run is still safe, because `apply` refuses
+# when that Monday's Batch tag already exists (unless --force), and the
+# concurrency group makes overlapping starts queue instead of running together.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Which job to run
+        type: choice
+        options: [weekly-topup]
+        default: weekly-topup
+      gate:
+        description: Apply the job's Central time window (the Cloudflare dispatcher sets this; leave off for a manual run)
+        type: boolean
+        default: false
+
+jobs:
+  weekly-topup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: weekly-topup
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Weekly top-up (dry run unless TOPUP_LIVE is "true")
+        env:
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          LIVE: ${{ vars.TOPUP_LIVE }}
+        run: |
+          ARGS="apply --slack"
+          if [ "$LIVE" = "true" ]; then ARGS="$ARGS --live"; fi
+          if [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 18:00-20:00"; fi
+          echo "python src/weekly_topup.py $ARGS"
+          python src/weekly_topup.py $ARGS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: weekly-topup-${{ github.run_id }}
+          path: |
+            output/pm_texts/topup_plan_*
+            output/account_backups/topup_write_*
+          if-no-files-found: ignore
