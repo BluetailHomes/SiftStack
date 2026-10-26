@@ -20,6 +20,8 @@ Safety rules
   - `plan`, and `apply` without --live, write nothing to DataSift.
   - `apply --live` refuses if that Monday's Batch tag already exists (a rerun would pick a second
     batch); pass --force only after checking what the first run did.
+  - The report opens with a warning when that Batch tag already exists, dry runs included, so a
+    plan can't look like a batch still waiting to be written.
   - Every write is logged to output/account_backups/topup_write_{date}.json, even on a crash.
   - Status is never set here; am-start owns the status flip (it starts the drip).
 """
@@ -184,10 +186,16 @@ def plan(api: Sift, target: int) -> dict:
             "mail_only": mail_only, "skipped": dict(skipped)}
 
 
-def report(p: dict, batch_date: str, target: int, live: bool = False) -> str:
+def report(p: dict, batch_date: str, target: int, live: bool = False, batch_exists: bool = False,
+           force: bool = False) -> str:
     el = p["eligible"]
     mode = "LIVE" if live else "DRY RUN, nothing written"
-    lines = [f"Weekly top-up plan for {batch_date} ({mode}): "
+    lines = []
+    if batch_exists:  # warn in dry runs too, so a plan can't look like a batch still waiting to be written
+        lines.append(f"Batch {batch_date} already exists, " +
+                     ("--force is overriding that and writing anyway" if live and force else
+                      "a live run would refuse (this week's batch may already be written)"))
+    lines += [f"Weekly top-up plan for {batch_date} ({mode}): "
              f"{len(el)} of {target} ready, {len(p['mail_only'])} Mail Only"]
     if len(el) < target:
         lines.append(f"  SHORT by {target - len(el)}: ran out of rungs")
@@ -348,7 +356,9 @@ def main() -> int:
     api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
     batch_date = args.batch_date or next_monday(ct_now().date()).isoformat()
     p = plan(api, args.target)
-    text = report(p, batch_date, args.target, live=live)
+    exists = f"Batch {batch_date}" in tag_uuids(api)
+    text = report(p, batch_date, args.target, live=live, batch_exists=exists,
+                  force=getattr(args, "force", False))
     print(text)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     out = STATE_DIR / f"topup_plan_{batch_date}.json"
