@@ -147,6 +147,31 @@ class DataSift:
                 break
         return out
 
+    def sent_from_line(self, line: str, since: dt.datetime, until: dt.datetime, max_pages: int = 60) -> list[dict]:
+        """Outbound SMS events sent from one of our lines between `since` and `until`, newest first."""
+        out, cursor = [], None
+        for _ in range(max_pages):
+            params = {"limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            page = self.get("/property/logs/", **params)
+            res = page.get("results", [])
+            if not res:
+                break
+            for e in res:
+                ts = dt.datetime.strptime(e["timestamp"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=dt.timezone.utc)
+                if ts > until:
+                    continue
+                if ts < since:
+                    return out
+                sms = (e.get("payload") or {}).get("sms") or {}
+                if e.get("event_type") == "owner.sms.sent" and digits(sms.get("origin_number")) == line:
+                    out.append(e)
+            cursor = page.get("next_cursor")
+            if not cursor:
+                break
+        return out
+
 
 def load_rules() -> str:
     return RULES_PATH.read_text(encoding="utf-8")
@@ -167,6 +192,92 @@ def pick_property(ds: DataSift, owner_uuid: str, texted_address_hint: str | None
         hint = 2 if texted_address_hint and street.lower() in texted_address_hint.lower() else 0
         return (hint, 1 if st == "prospecting" else 0, 1 if any(str(t).startswith("Batch") for t in tags) else 0)
     return sorted(props, key=rank, reverse=True)[0]
+
+
+# Unmatched replies (added 2026-10-26): a reply from a number on no DataSift record lands on a blank
+# owner smrtPhone creates, with no property. We match it back through the text we sent from the same
+# line shortly before. A reply we can't place is flagged once, in the run that first sees it (no saved
+# state: same idea as call-watch's lookback window).
+LINE_MATCH_HOURS = 24
+UNMATCHED_FLAG_WINDOW_MIN = 6
+
+
+def _street_named(street: str, text: str) -> bool:
+    """True if the reply names the street: its house number or its street name (4+ letters)."""
+    toks = street.lower().split()
+    if not toks:
+        return False
+    num = toks[0] if toks[0].isdigit() else ""
+    name = toks[1] if num and len(toks) > 1 else (toks[0] if not num else "")
+    t = text.lower()
+    return bool((num and re.search(rf"\b{num}\b", t)) or (len(name) >= 4 and re.search(rf"\b{re.escape(name)}\b", t)))
+
+
+def match_by_line(ds: DataSift, sms: dict, ts: str) -> tuple[dict | None, dict]:
+    """Find the property behind a reply from an unknown number, via our recent texts from the line it
+    replied to. Returns (candidate or None, info). A candidate is {"prop", "owner", "to", "text"}.
+    One property texted from that line in the window: use it. Several: use one only if the reply names
+    its street. Otherwise None, and info["candidates"] lists what was texted."""
+    line = digits(sms.get("destination_number"))
+    at = dt.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=dt.timezone.utc)
+    info: dict = {"line": line, "candidates": []}
+    if not line:
+        return None, info
+    cands: dict[str, dict] = {}
+    for e in ds.sent_from_line(line, at - dt.timedelta(hours=LINE_MATCH_HOURS), at):
+        s = (e.get("payload") or {}).get("sms") or {}
+        owner_uuid = e.get("resource") or s.get("owner")
+        if not owner_uuid:
+            continue
+        p = pick_property(ds, owner_uuid, s.get("message"))
+        if p and p["uuid"] not in cands:
+            cands[p["uuid"]] = {"prop": p, "owner": owner_uuid, "to": digits(s.get("destination_number")),
+                                "text": s.get("message") or ""}
+    info["candidates"] = list(cands.values())
+    if len(cands) == 1:
+        return info["candidates"][0], info
+    text = sms.get("message") or ""
+    named = [c for c in cands.values() if _street_named((c["prop"].get("address") or {}).get("street") or "", text)]
+    if len(named) == 1:
+        return named[0], info
+    return None, info
+
+
+def add_number_dnc_if_stop(ds: DataSift, owner: dict, number: str, out: dict) -> str:
+    """STOP from a number not on the record (a line-matched reply): add that number to the owner as
+    CORRECT_DNC. Only that number is touched. Returns a one-line summary, or "" if not a STOP."""
+    if out.get("category") != "stop":
+        return ""
+    if any(digits(p.get("number")) == number for p in owner.get("phones") or []):
+        return mark_number_dnc_if_stop(ds, owner, number, out)
+    if not owner.get("uuid"):
+        return f"DNC: could not add {number}, mark it by hand"
+    try:
+        ok = ds.set_phone_status(owner["uuid"], {"number": number}, "CORRECT_DNC")
+    except Exception as e:  # noqa: BLE001
+        log.warning("DNC add failed for %s: %s", number, e)
+        ok = False
+    return (f"DNC: added {number} to the owner as CORRECT_DNC" if ok
+            else f"DNC: FAILED to add {number} as CORRECT_DNC, mark it by hand")
+
+
+def flag_unmatched(sms: dict, ts: str, info: dict, dry_run: bool) -> bool:
+    """Post an unplaceable reply to Slack + Google Chat, once (only in the run that first sees it)."""
+    at = dt.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=dt.timezone.utc)
+    if dry_run or dt.datetime.now(dt.timezone.utc) - at > dt.timedelta(minutes=UNMATCHED_FLAG_WINDOW_MIN):
+        return False
+    cands = info.get("candidates") or []
+    line = info.get("line") or "?"
+    if cands:
+        lst = "\n".join(f"• {(c['prop'].get('address') or {}).get('street')} (we texted {c['to']}) "
+                        f"https://app.reisift.io/records/properties/{c['prop']['uuid']}/details" for c in cands[:8])
+        where = f"It could be any of these, texted from {line} in the last {LINE_MATCH_HOURS}h:\n{lst}"
+    else:
+        where = f"We sent nothing from {line} in the last {LINE_MATCH_HOURS}h, so it can't be matched."
+    is_stop = bool(re.fullmatch(r"\s*(stop|unsubscribe|quit|end|cancel)\W*", sms.get("message") or "", re.I))
+    slack(f"*Reply from an unknown number — needs a human*\n{digits(sms.get('origin_number'))} texted {line}:\n"
+          f"> {sms.get('message') or ''}\n{where}", needs_human=True, google_chat=not is_stop)
+    return True
 
 
 def build_thread(logs: list[dict], inbound_number: str) -> list[dict]:
@@ -294,16 +405,28 @@ def handle(ds: DataSift, rules: str, ev: dict, mode: str, dry_run: bool, model: 
         return result
     owner_uuid = ev.get("resource") or sms.get("owner")
     prop = pick_property(ds, owner_uuid, None)
+    matched = None
     if not prop:
-        result["why"] = "no property for owner"
-        return result
+        matched, info = match_by_line(ds, sms, ev["timestamp"])
+        if not matched:
+            result["why"] = "no property for owner; line match failed"
+            result["flagged"] = flag_unmatched(sms, ev["timestamp"], info, dry_run)
+            return result
+        prop, owner_uuid = matched["prop"], matched["owner"]
+        result["matched_via_line"] = matched["to"]
     pu = prop["uuid"]
     d = ds.property(pu)
     st = d.get("status"); st = st.get("title") if isinstance(st, dict) else st
     logs = ds.logs(pu)
-    thread = build_thread(logs, inbound_number)
+    if matched:
+        # The reply sits on smrtPhone's blank owner, so the record's log only has our side (to the
+        # number we texted); add the reply itself.
+        thread = build_thread(logs, matched["to"]) + [{"when": ev["timestamp"], "from": "owner",
+                                                        "text": sms.get("message") or ""}]
+    else:
+        thread = build_thread(logs, inbound_number)
     hint = next((m["text"] for m in reversed(thread) if m["from"] == "us"), "")
-    if len(ds.search({"must": {"owners": [owner_uuid]}}, limit=5)) > 1 and hint:
+    if not matched and len(ds.search({"must": {"owners": [owner_uuid]}}, limit=5)) > 1 and hint:
         prop = pick_property(ds, owner_uuid, hint) or prop
         if prop["uuid"] != pu:
             pu = prop["uuid"]; d = ds.property(pu); logs = ds.logs(pu); thread = build_thread(logs, inbound_number)
@@ -316,6 +439,8 @@ def handle(ds: DataSift, rules: str, ev: dict, mode: str, dry_run: bool, model: 
             "owner_first_name": own.get("first_name"), "owner_last_name": own.get("last_name"),
             "property_status": st, "inbound_number_status": phones.get(inbound_number),
             "inbound_is_primary": digits(own.get("primary_phone")) == inbound_number,
+            "inbound_number_note": (f"not on this record; matched by our text to {matched['to']} from the same line"
+                                    if matched else ""),
             "tags": [t for t in d.get("tags", []) if str(t).startswith(("Batch", "SMS Line", "Priority"))],
         },
         "thread": thread, "inbound_number": inbound_number, "inbound_text": sms.get("message") or "",
@@ -332,6 +457,8 @@ def handle(ds: DataSift, rules: str, ev: dict, mode: str, dry_run: bool, model: 
     if today_any:
         out["needs_human"] = True
         out["reason"] = "second inbound today; " + out.get("reason", "")
+    if matched:
+        out["needs_human"] = True
     result.update(classification=out, action="draft" if mode == "draft" else "auto")
     if dry_run:
         return result
@@ -344,7 +471,9 @@ def handle(ds: DataSift, rules: str, ev: dict, mode: str, dry_run: bool, model: 
             f"{'; note: ' + out['note'] if out.get('note') else ''}\nWhy: {out.get('reason', '')}")
     if mode == "auto":
         raise NotImplementedError("auto mode needs the send-SMS call wired; run in draft mode")
-    dnc_line = mark_number_dnc_if_stop(ds, own, inbound_number, out)
+    if matched:
+        note = note.replace("Owner texted from", f"Matched by line (we texted {matched['to']}); reply came from", 1)
+    dnc_line = (add_number_dnc_if_stop if matched else mark_number_dnc_if_stop)(ds, own, inbound_number, out)
     if dnc_line:
         note += "\n" + dnc_line
         result["dnc"] = dnc_line
