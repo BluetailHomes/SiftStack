@@ -67,7 +67,7 @@ LEGACY_TEXT_CAP = 20
 LEGACY_TAG_PREFIX = "Legacy Recall"
 MAX_PER_LINE = 20
 MIN_VM_SECONDS = 20
-SHIFT = ("10:00", "19:00")   # Rahaf's agreed shift, Central (Kaycie, 2026-10-21)
+SHIFT = ("10:00", "18:00")   # Rahaf's shift, Central, no lunch (her request, from 2026-10-26)
 DIAL_FLOOR = 150             # daily dial floor (rahaf-kpi-scorecard production standards)
 SESSION_GAP_MIN = 15         # actions closer than this count as continuous work
 BREAK_MIN = 30               # gaps at least this long inside the shift are listed
@@ -1092,17 +1092,22 @@ def group_inbound_calls(events: list[dict]) -> list[dict]:
         t = to_ct(e.get("timestamp"))
         if not key or t is None:
             continue
-        g = calls.setdefault(key, {"caller": caller, "line": line, "first": t, "names": [],
-                                   "duration": 0, "recording": None, "missed": False})
+        g = calls.setdefault(key, {"caller": caller, "line": line, "first": t, "last": t, "names": [],
+                                   "duration": 0, "recording": None, "missed": False, "final": False})
         g["first"] = min(g["first"], t)
+        g["last"] = max(g["last"], t)
         o = (p.get("extra_info") or {}).get("owner") or {}
         name = " ".join(x for x in (o.get("first_name"), o.get("last_name")) if x).strip()
         if name and name not in g["names"]:
             g["names"].append(name)
         g["duration"] = max(g["duration"], int(c.get("duration") or 0))
         g["recording"] = g["recording"] or c.get("recording")
-        if e.get("event_type") == "owner.call.missed" or (c.get("extra") or {}).get("status") == "missed":
+        status = (c.get("extra") or {}).get("status")
+        if e.get("event_type") == "owner.call.missed" or status == "missed":
             g["missed"] = True
+        # owner.call.received lands first with no outcome; missed/answered follows 9s-3.5min later
+        if e.get("event_type") in ("owner.call.missed", "owner.call.answered") or status in ("missed", "answered"):
+            g["final"] = True
     return sorted(calls.values(), key=lambda g: g["first"])
 
 
@@ -1140,7 +1145,8 @@ def fetch_events_since(api: "Sift", cutoff: dt.datetime) -> list[dict]:
 
 def run_call_watch(args) -> int:
     """Post every inbound call to our lines (missed, answered or voicemail) to Google Chat
-    and Slack. No saved state: each run reports calls that started in the last window."""
+    and Slack. No saved state: each run reports calls whose final (missed/answered) event
+    landed in the last window, so a call posts once, after DataSift has its outcome."""
     now = ct_now()
     if args.day:
         day = dt.date.fromisoformat(args.day)
@@ -1150,7 +1156,7 @@ def run_call_watch(args) -> int:
         cutoff = now - dt.timedelta(minutes=args.window_min)
     api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
     calls = [g for g in group_inbound_calls(fetch_events_since(api, cutoff))
-             if cutoff.replace(tzinfo=None) < g["first"].replace(tzinfo=None) <= now.replace(tzinfo=None)]
+             if g["final"] and cutoff.replace(tzinfo=None) < g["last"].replace(tzinfo=None) <= now.replace(tzinfo=None)]
     print(f"call-watch: {len(calls)} inbound call(s) since {cutoff:%Y-%m-%d %H:%M} CT")
     for g in calls:
         msg = call_message(g)
