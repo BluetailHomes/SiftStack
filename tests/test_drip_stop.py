@@ -1,6 +1,6 @@
 """Drip-stop rules added 2026-10-21: the auto-responder pulls a record from its running drip when
 the dripped (primary) number replies at all (a STOP from another number leaves the drip and only
-gets that number marked DNC), STOPs never post to Google Chat, and the drip exit guard pulls
+gets that number marked DNC), STOPs post to Slack and Google Chat (changed 2026-10-26), and the drip exit guard pulls
 prospecting records whose primary phone is marked Wrong/Dead."""
 import sys
 from pathlib import Path
@@ -101,15 +101,6 @@ def test_set_phone_status_sends_one_phone_with_tag_titles():
     assert method == "POST" and url.endswith("/owner/o1/upsert-phones/")
     assert body["phones"] == [{"number": "(816) 555-1234", "type": "MOBILE", "tags": ["Dial First"],
                                "status": "CORRECT_DNC", "is_connected": True, "verified": False}]
-
-
-def test_slack_google_chat_false_skips_google_chat(monkeypatch):
-    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://slack.example/x")
-    monkeypatch.setenv("GOOGLE_CHAT_WEBHOOK_URL", "https://chat.example/y")
-    monkeypatch.setenv("GOOGLE_CHAT_ALL", "true")
-    with patch.object(r.requests, "post") as post:
-        r.slack("STOP draft", needs_human=True, google_chat=False)
-    assert [c.args[0] for c in post.call_args_list] == ["https://slack.example/x"]
 
 
 def test_slack_needs_human_still_reaches_google_chat(monkeypatch):

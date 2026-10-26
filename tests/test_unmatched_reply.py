@@ -155,9 +155,9 @@ def test_flag_dry_run_posts_nothing(monkeypatch):
     post.assert_not_called()
 
 
-def test_flag_stop_skips_google_chat(monkeypatch):
+def test_flag_stop_reaches_google_chat(monkeypatch):
     _hooks(monkeypatch)
     with patch.object(r.requests, "post") as post:
         assert r.flag_unmatched(_reply("STOP"), _ago(1), {"line": LINE, "candidates": []}, dry_run=False)
-    assert [c.args[0] for c in post.call_args_list] == ["https://slack.example/x"]
+    assert [c.args[0] for c in post.call_args_list] == ["https://slack.example/x", "https://chat.example/y"]
     assert "We sent nothing" in str(post.call_args_list[0])

@@ -274,9 +274,8 @@ def flag_unmatched(sms: dict, ts: str, info: dict, dry_run: bool) -> bool:
         where = f"It could be any of these, texted from {line} in the last {LINE_MATCH_HOURS}h:\n{lst}"
     else:
         where = f"We sent nothing from {line} in the last {LINE_MATCH_HOURS}h, so it can't be matched."
-    is_stop = bool(re.fullmatch(r"\s*(stop|unsubscribe|quit|end|cancel)\W*", sms.get("message") or "", re.I))
     slack(f"*Reply from an unknown number — needs a human*\n{digits(sms.get('origin_number'))} texted {line}:\n"
-          f"> {sms.get('message') or ''}\n{where}", needs_human=True, google_chat=not is_stop)
+          f"> {sms.get('message') or ''}\n{where}", needs_human=True)
     return True
 
 
@@ -378,15 +377,12 @@ def classify(rules: str, ctx: dict, model: str) -> dict | None:
     return out
 
 
-def slack(text: str, needs_human: bool = False, google_chat: bool = True) -> None:
+def slack(text: str, needs_human: bool = False) -> None:
     """Post to the chat webhooks. Slack gets every draft; Google Chat (Rahaf's space) gets only the
-    drafts flagged needs-a-human, unless GOOGLE_CHAT_ALL=true. google_chat=False keeps a post out of
-    Google Chat entirely (STOPs, Kaycie's call 2026-10-21: the number is DNC'd automatically)."""
+    drafts flagged needs-a-human, unless GOOGLE_CHAT_ALL=true."""
     for name, env in (("Slack", "SLACK_WEBHOOK_URL"), ("Google Chat", "GOOGLE_CHAT_WEBHOOK_URL")):
         url = os.environ.get(env)
         if not url:
-            continue
-        if env == "GOOGLE_CHAT_WEBHOOK_URL" and not google_chat:
             continue
         if env == "GOOGLE_CHAT_WEBHOOK_URL" and not needs_human and os.environ.get("GOOGLE_CHAT_ALL", "").lower() != "true":
             continue
@@ -487,8 +483,7 @@ def handle(ds: DataSift, rules: str, ev: dict, mode: str, dry_run: bool, model: 
           f"> {ctx['inbound_text']}\nSuggested: {out.get('reply') or '(none)'}\n"
           f"{dnc_line + chr(10) if dnc_line else ''}"
           f"{drip_line + chr(10) if drip_line else ''}"
-          f"https://app.reisift.io/records/properties/{pu}/details", needs_human=bool(out.get("needs_human")),
-          google_chat=out.get("category") != "stop")
+          f"https://app.reisift.io/records/properties/{pu}/details", needs_human=bool(out.get("needs_human")) or out.get("category") == "stop")
     return result
 
 
