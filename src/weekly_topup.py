@@ -37,8 +37,8 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pm_text_sender import (  # noqa: E402
-    CALLER_USER_UUID, PRESET_01_TITLE, STATE_DIR, Sift, _best_primary, _env, _google_chat, _in_window, _slack,
-    ct_now,
+    CALLER_EMAIL, CALLER_USER_UUID, PRESET_01_TITLE, STATE_DIR, Sift, _best_primary, _env, _google_chat, _in_window, _slack,
+    ct_now, load_day,
 )
 
 PRESET_01_UUID = "4881671f-526c-440f-add2-97564c89d069"
@@ -335,6 +335,17 @@ def apply(api: Sift, p: dict, batch_date: str, force: bool = False) -> str:
     return "\n".join(out)
 
 
+def kpi_week(api: Sift, batch_date: str) -> str:
+    """Weekly KPI section for the Mon-Fri before `batch_date` (Slack only)."""
+    try:
+        import kpi_scorecard
+        mon = dt.date.fromisoformat(batch_date) - dt.timedelta(days=7)
+        days = {d: load_day(api, d, CALLER_EMAIL) for d in ((mon + dt.timedelta(days=i)).isoformat() for i in range(5))}
+        return "\n" + kpi_scorecard.weekly_lines(days, CALLER_EMAIL)
+    except Exception as e:
+        return f"\n(KPI scorecard failed: {e})"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -374,7 +385,7 @@ def main() -> int:
         print(result)
         text += "\n" + result
     if args.slack:
-        _slack(text)
+        _slack(text + kpi_week(api, batch_date))
         _google_chat(text)
     return rc
 

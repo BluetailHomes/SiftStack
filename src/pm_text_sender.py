@@ -238,7 +238,7 @@ def load_day(api: Sift, day: str, caller: str) -> list[dict]:
                          "by": (e["payload"]["sms"].get("external_user") or {}).get("email")} for e in today if e["event_type"] == "owner.sms.sent"],
             "sms_in": [{"ct": e["_ct"], "from": e["payload"]["sms"].get("origin_number") or "", "text": e["payload"]["sms"].get("message") or ""}
                        for e in today if e["event_type"] == "owner.sms.received"],
-            "marks": [{"ct": e["_ct"], "phone": e["payload"]["owner"].get("phone"), "to": (e["payload"]["owner"].get("status") or [None, None])[-1], "by": _who(e)}
+            "marks": [{"ct": e["_ct"], "phone": e["payload"]["owner"].get("phone"), "frm": (e["payload"]["owner"].get("status") or [None, None])[0], "to": (e["payload"]["owner"].get("status") or [None, None])[-1], "by": _who(e)}
                       for e in today if e["event_type"] == "owner.phone.status.updated"],
             "status_changes": [{"ct": e["_ct"], "to": (e["payload"]["property"].get("status") or [None, None])[-1], "by": _who(e)} for e in today if e["event_type"] == "property.status.updated"],
             "attempt_bumps": [e["_ct"] for e in today if e["event_type"] == "property.predictivecall.attempts.increased" and _who(e) == caller],
@@ -641,7 +641,13 @@ def run_audit(args) -> int:
     except RuntimeError as e:
         print(f"(legacy presets skipped: {e})")
         legacy = None
-    report = build_audit(load_day(api, day, CALLER_EMAIL), day, CALLER_EMAIL, legacy)
+    models = load_day(api, day, CALLER_EMAIL)
+    report = build_audit(models, day, CALLER_EMAIL, legacy)
+    try:
+        import kpi_scorecard
+        report += "\n" + kpi_scorecard.daily_lines(models, CALLER_EMAIL)
+    except Exception as e:
+        report += f"\n(KPI scorecard failed: {e})"
     print(report)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     (STATE_DIR / f"audit_{day}.md").write_text(report, encoding="utf-8")
