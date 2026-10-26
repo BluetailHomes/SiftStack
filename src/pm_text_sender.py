@@ -134,16 +134,20 @@ class Sift:
         if override:
             h["x-http-method-override"] = override
         req = urllib.request.Request(API + path, data=data, method=method, headers=h)
-        for attempt in range(6):
+        for attempt in range(12):
             try:
                 with urllib.request.urlopen(req, timeout=90) as r:
                     t = r.read().decode()
                     return json.loads(t) if t.strip().startswith(("{", "[")) else t
             except urllib.error.HTTPError as e:
                 txt = e.read().decode(errors="replace")
-                if e.code == 429 and attempt < 5:
+                if e.code == 429 and attempt < 11:
+                    # The server's "available in N seconds" hint is often too short when
+                    # throttling persists, so back off at least 3s, 6s, 9s, ... as well.
                     m = re.search(r"available in (\d+)\s*second", txt, re.I)
-                    time.sleep(min((int(m.group(1)) + 1) if m else 5 * (attempt + 1), 300))
+                    hint = int(m.group(1)) + 1 if m else 0
+                    time.sleep(min(max(hint, 3 * (attempt + 1)), 300))
+                    self._last = time.time()
                     continue
                 if e.code >= 500 and attempt < 3:
                     time.sleep(2 ** attempt)
