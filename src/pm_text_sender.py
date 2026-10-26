@@ -22,9 +22,10 @@ Modes
     python src/pm_text_sender.py pm-texts --day 2026-10-19   # backtest a past day (dry run only)
     python src/pm_text_sender.py audit               # end-of-day checklist (stdout + Slack if webhook set)
     python src/pm_text_sender.py line-watch          # alert when a line crosses 20 texts today
+    python src/pm_text_sender.py call-watch          # post inbound calls/voicemails to Google Chat + Slack
 
 Env: REISIFT_API_KEY, SMRTPHONE_API_TOKEN (pm-texts --send), SLACK_WEBHOOK_URL,
-GOOGLE_CHAT_WEBHOOK_URL (line-watch) (optional). Caller/lines are constants below; change them there when the
+GOOGLE_CHAT_WEBHOOK_URL (line-watch, call-watch) (optional). Caller/lines are constants below; change them there when the
 roster changes.
 
 Safety rules baked in: never texts a number marked Correct/Wrong/Dead/DNC, an
@@ -1048,6 +1049,108 @@ def run_line_watch(args) -> int:
     return 0
 
 
+def line_label(n) -> str:
+    """Which of our lines a number is, for the call-watch message."""
+    d = _d10(n)
+    for name, num in SMS_LINE_NUMBERS.items():
+        if num == d:
+            return name
+    if d in PM_LINES:
+        return "afternoon line"
+    if d in CALL_LINES:
+        return "call line"
+    if d == CALLBACK_LINE:
+        return "callback line"
+    return "line"
+
+
+def group_inbound_calls(events: list[dict]) -> list[dict]:
+    """Inbound owner.call.* events to our lines, one entry per call (a call fans out
+    to every owner with that number, so events are grouped by the call's external_id)."""
+    calls: dict[str, dict] = {}
+    for e in events:
+        if not str(e.get("event_type") or "").startswith("owner.call."):
+            continue
+        p = e.get("payload") or {}
+        c = p.get("call") or {}
+        if c.get("direction") != "inbound":
+            continue
+        line, caller = _d10(c.get("destination_number")), _d10(c.get("origin_number"))
+        if line not in OUR_LINES or caller in OUR_LINES:
+            continue
+        key = c.get("external_id") or c.get("uuid")
+        t = to_ct(e.get("timestamp"))
+        if not key or t is None:
+            continue
+        g = calls.setdefault(key, {"caller": caller, "line": line, "first": t, "names": [],
+                                   "duration": 0, "recording": None, "missed": False})
+        g["first"] = min(g["first"], t)
+        o = (p.get("extra_info") or {}).get("owner") or {}
+        name = " ".join(x for x in (o.get("first_name"), o.get("last_name")) if x).strip()
+        if name and name not in g["names"]:
+            g["names"].append(name)
+        g["duration"] = max(g["duration"], int(c.get("duration") or 0))
+        g["recording"] = g["recording"] or c.get("recording")
+        if e.get("event_type") == "owner.call.missed" or (c.get("extra") or {}).get("status") == "missed":
+            g["missed"] = True
+    return sorted(calls.values(), key=lambda g: g["first"])
+
+
+def call_message(g: dict) -> str:
+    who = ", ".join(g["names"][:3]) + (f" +{len(g['names']) - 3} more" if len(g["names"]) > 3 else "")
+    if g["recording"]:
+        outcome = "left a voicemail" if g["missed"] else f"talked {g['duration']}s"
+    elif g["duration"] > 0:
+        outcome = f"answered, {g['duration']}s"
+    else:
+        outcome = "missed call, no voicemail"
+    msg = (f"Incoming call: {fmt_phone(g['caller'])}" + (f" ({who})" if who else " (not in DataSift)")
+           + f" called {line_label(g['line'])} {fmt_phone(g['line'])} at {g['first']:%I:%M %p} — {outcome}.")
+    if g["recording"]:
+        msg += f" Recording: {g['recording']}"
+    return msg
+
+
+def fetch_events_since(api: "Sift", cutoff: dt.datetime) -> list[dict]:
+    """Every feed event newer than cutoff (the feed is newest first)."""
+    out, cur = [], None
+    while True:
+        path = "/api/internal/property/logs/?limit=100" + (f"&cursor={urllib.parse.quote(str(cur))}" if cur else "")
+        r = api.call(path) or {}
+        page = r.get("results") or []
+        for e in page:
+            t = to_ct(e.get("timestamp"))
+            if t is not None and t.replace(tzinfo=None) > cutoff.replace(tzinfo=None):
+                out.append(e)
+        last = to_ct(page[-1].get("timestamp")) if page else None
+        cur = r.get("next_cursor")
+        if not page or not cur or (last is not None and last.replace(tzinfo=None) <= cutoff.replace(tzinfo=None)):
+            return out
+
+
+def run_call_watch(args) -> int:
+    """Post every inbound call to our lines (missed, answered or voicemail) to Google Chat
+    and Slack. No saved state: each run reports calls that started in the last window."""
+    now = ct_now()
+    if args.day:
+        day = dt.date.fromisoformat(args.day)
+        now = dt.datetime.combine(day, dt.time(23, 59, 59), tzinfo=now.tzinfo)
+        cutoff = dt.datetime.combine(day, dt.time(0, 0), tzinfo=now.tzinfo)
+    else:
+        cutoff = now - dt.timedelta(minutes=args.window_min)
+    api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
+    calls = [g for g in group_inbound_calls(fetch_events_since(api, cutoff))
+             if cutoff.replace(tzinfo=None) < g["first"].replace(tzinfo=None) <= now.replace(tzinfo=None)]
+    print(f"call-watch: {len(calls)} inbound call(s) since {cutoff:%Y-%m-%d %H:%M} CT")
+    for g in calls:
+        msg = call_message(g)
+        print("CALL: " + msg)
+        if not args.no_post:
+            _google_chat(msg)
+            _slack(msg)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="mode", required=True)
@@ -1081,6 +1184,11 @@ def main() -> int:
     w.add_argument("--threshold", type=int, default=LINE_ALERT_AT)
     w.add_argument("--no-post", action="store_true", help="print only, don't post")
     w.set_defaults(fn=run_line_watch)
+    cw = sub.add_parser("call-watch", help="post inbound calls/voicemails on our lines to Google Chat + Slack")
+    cw.add_argument("--day", help="YYYY-MM-DD: report every inbound call that day (backtest)")
+    cw.add_argument("--window-min", type=int, default=6, help="report calls that started in the last N minutes")
+    cw.add_argument("--no-post", action="store_true", help="print only, don't post")
+    cw.set_defaults(fn=run_call_watch)
     args = ap.parse_args()
     return args.fn(args)
 
