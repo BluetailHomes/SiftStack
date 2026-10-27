@@ -8,6 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current status (as of 2026-10-27)
 
+- **Pre-Tulum sprint (deadline Fri 2026-10-30):** `docs/pre-tulum-tracker.md` is the source of truth for what's in progress, done, and next. Read it at the start of a sprint session and update it before ending.
+
 - **Scraper production is PAUSED** (since 2026-09-29): all 4 Apify schedules (MO `irDDOAu0oVG1kdQvr`, NM `f5eGSQ0If5J50xrZx`, KS `c7OJT1cG8PzJayuwq`, OK `ABj82kJNqoI1kmN9C`) are `isEnabled: false`, and the `stage2-datasift-upload.yml` workflow is disabled. Nothing was deleted. To resume: `PUT /v2/schedules/{id}` `{"isEnabled": true}` and re-enable the workflow (`POST /repos/BluetailHomes/SiftStack/actions/workflows/321011465/enable`). Details: `docs/claude/markets-and-status.md`.
 - **Active focus: Jackson County, MO only** — 16 native DataSift SiftMap "Priority 1" presets built off the Doors-Per-Deal export, an Obituary track, and 4 targeted county-record pulls. Plan: `docs/claude/jackson-build-sheet.md`. Daily automation for Rahaf's P1 calling (am-start, afternoon voicemail texts, SMS responder, line/call watch, drip exit guard, KPI scorecard, weekly top-up): `docs/claude/pm-text-automation.md`.
 - **Markets:** MO (Jackson, Clay, Platte, Cass), KS (Johnson), NM (Bernalillo, Sandoval), OK (Oklahoma, Tulsa); TN (Knox, Blount) is dormant/legacy. Every module keys off `COUNTIES` in `src/config.py`.
