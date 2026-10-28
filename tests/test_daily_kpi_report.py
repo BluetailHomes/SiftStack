@@ -664,6 +664,14 @@ def test_correction_replaces_and_keeps_the_original():
     assert len(flags) == 1 and "was corrected by" in flags[0][1] and flags[0][0].date() == dt.date(2026, 11, 4)
     o = r.summarize_offers({"ok": True, "events": events, "flags": flags}, dt.date(2026, 11, 2), tracked_from=dt.date(2026, 10, 30))
     assert o["day"]["offers"] == 1 and o["day"]["review"] == 0                # counted on the day it was presented
+    assert o["week"]["offers"] == 1 and o["week"]["initial"] == 1             # original + correction = one offer, not two
+    o4 = r.summarize_offers({"ok": True, "events": events, "flags": flags}, dt.date(2026, 11, 4), tracked_from=dt.date(2026, 10, 30))
+    assert o4["day"]["offers"] == 0 and o4["week"]["offers"] == 1             # nothing shifts to the day it was fixed
+    # a correction of a counted offer (wrong method) still leaves exactly one
+    good = ev("OFFER | INITIAL | $75,000 | TEXT | APPROVED: Kaycie", "2026-11-02T15:00:00Z")
+    fix2 = ev("OFFER | INITIAL | $75,000 | VERBAL | APPROVED: Kaycie\nCORRECTION: it was a call", "2026-11-03T15:00:00Z")
+    st, _ = statuses([appr, good, fix2])
+    assert st == ["corrected", "counted"]
 
 
 def test_correction_cannot_use_a_later_approval():
