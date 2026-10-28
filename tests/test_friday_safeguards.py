@@ -41,11 +41,18 @@ def _log(phone, old, new, ts="2026-10-20T15:00:00"):
 class FakeApi:
     """GET-by-path fake of pm_text_sender.Sift. A POST of status starts a drip, like DataSift."""
 
-    def __init__(self, props, drips=None, logs=None, fail=()):
+    TAGS = [{"uuid": u, "title": t} for u, t in (pts.STOP_REVIEW_TAG, pts.POST_SEQ_HOLD_TAG)]
+
+    def __init__(self, props, drips=None, logs=None, fail=(), tags=None):
         self.props, self.drips, self.logs, self.fail = props, drips or {}, logs or {}, set(fail)
+        self.tags = self.TAGS if tags is None else tags
         self.writes = []
 
     def call(self, path, method="GET", body=None):
+        if path.startswith("/api/internal/tag/") and method == "GET":
+            if "tags" in self.fail:
+                raise RuntimeError("HTTP 502")
+            return {"results": self.tags}
         if method != "GET":
             self.writes.append((method, path, body))
             u = path.split("/")[4]
@@ -242,14 +249,21 @@ def test_load_ready_file_problems(tmp_path):
     assert pts.load_ready_file(_marker(tmp_path), "2026-11-02")[1] is None
 
 
-def _plan(tmp_path, uuids):
+def _plan(tmp_path, uuids, phones=None):
     (tmp_path / "topup_plan_2026-11-02.json").write_text(json.dumps(
-        {"eligible": [{"uuid": u, "line": "A", "best_phone": PRIMARY} for u in uuids]}))
+        {"eligible": [{"uuid": u, "line": "A", "best_phone": (phones or {}).get(u, PRIMARY), "owner_uuid": f"o-{u}"}
+                      for u in uuids]}))
+
+
+def _det_n(n, **kw):
+    return _det([_phone(n)], primary=n, **kw)
 
 
 def test_validate_ready_and_excluded(tmp_path):
-    _plan(tmp_path, ["u1", "u2", "u3"])
-    api = FakeApi({"u1": _det(), "u2": _det(tags=("SMS Line A",)), "u3": _det()}, drips={"u3": [{"status": "failed"}]})
+    nums = {"u1": "8165550011", "u2": "8165550012", "u3": "8165550013"}
+    _plan(tmp_path, ["u1", "u2", "u3"], nums)
+    api = FakeApi({"u1": _det_n(nums["u1"]), "u2": _det_n(nums["u2"], tags=("SMS Line A",)), "u3": _det_n(nums["u3"])},
+                  drips={"u3": [{"status": "failed"}]})
     with patch.object(wt, "STATE_DIR", tmp_path):
         mk, text = wt.validate(api, "2026-11-02")
     assert mk["ok"] and mk["uuids"] == ["u1"] and mk["lines"] == {"u1": "SMS Line A"}
@@ -273,6 +287,79 @@ def test_validate_excludes_ambiguous_stop(tmp_path):
     with patch.object(wt, "STATE_DIR", tmp_path):
         mk, _ = wt.validate(api, "2026-11-02")
     assert not mk["ok"] and "STOP hold" in mk["excluded"]["u1"][0]
+
+
+# ------------------------------------------------------------ P1 exclusion tags
+
+STOP_REVIEW = "STOP – Review"
+HOLD = "P1 Hold – Post-Sequence"
+ARAM = "52f78fea-445b-4d1e-8a1f-27be5269b5ea"
+
+
+def test_tag_match_ignores_dash_style_and_case():
+    assert pts._tag_key("STOP - Review") == pts._tag_key(STOP_REVIEW) == pts._tag_key("stop — review")
+    assert pts._tag_key({"title": HOLD}) == pts._tag_key("P1 Hold - Post-Sequence")
+
+
+def test_outreach_and_enroll_blocks():
+    assert pts.outreach_block(_det()) is None and pts.enroll_block(_det()) is None
+    assert "STOP" in pts.outreach_block(_det(tags=(BATCH, "SMS Line A", STOP_REVIEW)))
+    held = _det(tags=(BATCH, "SMS Line A", HOLD))
+    assert pts.outreach_block(held) is None and "Post-Sequence" in pts.enroll_block(held)
+    aram = _det(owner={"uuid": ARAM})
+    assert "Aram" in pts.outreach_block(aram) and "Aram" in pts.enroll_block(aram)
+    assert pts.enroll_block(_det(tags=(BATCH, "SMS Line A", "Text Only"))) is None   # dialer rule, not a text block
+
+
+def test_gates_refuse_excluded_records():
+    ok = pts.stop_policy({}, {}, {})
+    for d in (_det(tags=(BATCH, "SMS Line A", STOP_REVIEW)), _det(tags=(BATCH, "SMS Line A", HOLD)), _det(owner={"uuid": ARAM})):
+        assert pts.am_start_gate(d, ok, [], BATCH)
+        assert wt.skip_reason(dict(d, assigned_to=None)).startswith("excluded")
+
+
+def test_pm_text_plan_skips_stop_review_record():
+    m = {"uuid": "u1", "street": "1 MAIN ST", "status": "prospecting", "owner_first": "JANE", "tags": [STOP_REVIEW],
+         "phones": {PRIMARY: _phone(PRIMARY)}, "stop": pts.stop_policy({}, {PRIMARY: _phone(PRIMARY)}, {}),
+         "blocked": pts.outreach_block({"tags": [STOP_REVIEW]}), "sms_out": [], "sms_in": [], "marks": [], "attempts": 1, "attempt_bumps": 1,
+         "calls": [{"by": "c", "dir": "outbound", "result": "answered", "to": PRIMARY, "dur": 40,
+                    "ct": dt.datetime(2026, 10, 28, 14, 0)}]}
+    with patch.object(pts, "final_mark", return_value="NO_ANSWER"):
+        to_send, skipped = pts.plan_pm_texts([m], "2026-10-28", "c", set())[:2]
+    assert not to_send and "no automated outreach" in skipped[0]["why"]
+
+
+def test_review_tags_problem_fails_closed():
+    assert pts.review_tags_problem(FakeApi({})) is None
+    assert "renamed" in pts.review_tags_problem(FakeApi({}, tags=[{"uuid": pts.STOP_REVIEW_TAG[0], "title": "STOP"}]))
+    assert "unreadable" in pts.review_tags_problem(FakeApi({}, fail={"tags"}))
+
+
+def test_validate_excludes_tagged_and_duplicate_records(tmp_path):
+    nums = {"u1": "8165550011", "u2": "8165550012", "u3": "8165550013", "u4": "8165550013"}
+    _plan(tmp_path, ["u1", "u2", "u3", "u4"], nums)
+    api = FakeApi({"u1": _det_n(nums["u1"]), "u2": _det_n(nums["u2"], tags=(BATCH, "SMS Line A", HOLD)),
+                   "u3": _det_n(nums["u3"]), "u4": _det_n(nums["u4"])})
+    with patch.object(wt, "STATE_DIR", tmp_path):
+        mk, _ = wt.validate(api, "2026-11-02")
+    assert mk["ok"] and mk["uuids"] == ["u1"]
+    assert "Post-Sequence" in " ".join(mk["excluded"]["u2"])
+    assert all("batch records" in " ".join(mk["excluded"][u]) for u in ("u3", "u4"))
+
+
+def test_validate_fails_closed_when_review_tags_unconfirmed(tmp_path):
+    _plan(tmp_path, ["u1"])
+    with patch.object(wt, "STATE_DIR", tmp_path):
+        mk, text = wt.validate(FakeApi({"u1": _det()}, tags=[]), "2026-11-02")
+    assert not mk["ok"] and "review tag" in mk["problem"] and "will NOT launch" in text
+
+
+def test_am_start_live_fails_closed_when_review_tags_unreadable(tmp_path):
+    api = FakeApi({"u1": _det()}, fail={"tags"})
+    with patch.object(pts, "ct_now", return_value=MON_950), patch.object(pts, "_env", return_value="k"), \
+            patch.object(pts, "Sift", return_value=api), patch.object(pts, "STATE_DIR", tmp_path):
+        assert pts.run_am_start(_args(ready_file=_marker(tmp_path))) == 1
+    assert api.writes == []
 
 
 # ------------------------------------------------------------ drip guard STOP narrowing
@@ -343,3 +430,19 @@ def test_load_capacity_counts_running_drips_per_line():
         cap = pts.load_capacity(None, Counter())
     assert cap["SMS Line B"] == {"sent": 4, "running": 3, "started": 0, "capacity": 4}   # (20-4-6-2)//2
     assert cap["SMS Line A"]["capacity"] == 9
+
+
+# ------------------------------------------------------------ finished drips stay out of new batches
+
+def test_finished_drip_records_stay_ineligible(tmp_path):
+    """Kyuhong/Julie/Chereena (Batch 2026-10-19): once their drips finish, every blocker but the
+    run state stays, so top-up must still refuse them (P1 handoff, 2026-10-27)."""
+    d = _det(tags=("Batch 2026-10-19", "SMS Line A"), status="prospecting")
+    assert wt.skip_reason(d) == "assigned"
+    assert wt.skip_reason(dict(d, assigned_to=None, status=None)) == "batch/line tag"
+    nums = {"u1": "8165550011"}
+    _plan(tmp_path, ["u1"], nums)
+    api = FakeApi({"u1": _det_n(nums["u1"])}, drips={"u1": [{"status": "completed"}]})
+    with patch.object(wt, "STATE_DIR", tmp_path):
+        mk, _ = wt.validate(api, "2026-11-02")
+    assert "u1" not in mk["uuids"] and "has drip history" in mk["excluded"]["u1"]

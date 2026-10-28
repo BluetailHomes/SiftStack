@@ -74,6 +74,16 @@ BREAK_MIN = 30               # gaps at least this long inside the shift are list
 SEND_WINDOW = (16, 18)   # Central hours during which a scheduled --send is allowed
 TERMINAL_MARKS = {"CORRECT", "WRONG", "DEAD", "DNC", "CORRECT_DNC", "WRONG_DNC"}   # marks that end the afternoon text for a number
 BAD_MARKS = {"WRONG", "DEAD", "DNC", "CORRECT_DNC", "WRONG_DNC"}                    # marks that disqualify a number as the drip's primary phone
+# P1's review tags (verified in DataSift 2026-10-27). Property details carry tag titles, so the
+# gates match titles; review_tags_problem() checks these uuids still carry these titles, so a
+# rename fails closed instead of silently matching nothing. "Text Only" (56e19b76) is a dialer
+# rule: keep those records off SmrtDialer lists. It does not block texts.
+STOP_REVIEW_TAG = ("f06c1d11-3132-475a-bd60-6f276b0d7da3", "STOP – Review")             # no automated outreach at all
+POST_SEQ_HOLD_TAG = ("11989878-10e7-49a9-a697-a5bbf28f324d", "P1 Hold – Post-Sequence")  # no new enrollment
+# Owners who get no direct outreach from any automated path (owner uuid -> why).
+NO_DIRECT_OUTREACH = {
+    "52f78fea-445b-4d1e-8a1f-27be5269b5ea": "Aram Damirjian: no direct outreach, realtor contact handled separately (Kaycie, 2026-10-27)",
+}
 
 TEMPLATES = {
     1: "Hey {first}, it's Britney. Just wanted to make sure you got my voicemail about {street}.",
@@ -242,7 +252,7 @@ def load_day(api: Sift, day: str, caller: str, stats: dict | None = None) -> lis
                 "uuid": u, "street": (det.get("address") or {}).get("street") or "", "status": det.get("status"),
                 "assigned_to": det.get("assigned_to"), "tags": det.get("tags") or [], "attempts": det.get("predictivecall_attempts") or 0,
                 "owner_first": (owner.get("first_name") or "").strip(), "owner_dnc": bool(owner.get("dnc")), "owner_opt_out": bool(owner.get("opt_out")),
-                "phones": phones, "stop": stop_policy(owner, phones, dnc_origins(evs)),
+                "phones": phones, "stop": stop_policy(owner, phones, dnc_origins(evs)), "blocked": outreach_block(det),
                 "primary": _d10((owner.get("primary_phone") or {}).get("number") if isinstance(owner.get("primary_phone"), dict) else owner.get("primary_phone")),
                 "open_tasks": rec.get("tasks") if isinstance(rec.get("tasks"), int) else None,
                 "calls": sorted(calls.values(), key=lambda c: c["ct"]), "call_days": all_call_days,
@@ -308,6 +318,43 @@ def dnc_origins(evs: list[dict]) -> dict[str, str | None]:
         if new in DNC_MARKS and old not in DNC_MARKS:
             out[_d10(o.get("phone"))] = old
     return out
+
+
+def _tag_key(t) -> str:
+    """Tag title compared loosely: en/em dash or hyphen, spacing and case don't matter."""
+    t = t if isinstance(t, str) else ((t or {}).get("title") or "")
+    return re.sub(r"\s*[-–—]\s*", " - ", t).strip().casefold()
+
+
+def outreach_block(det: dict) -> str | None:
+    """Why no automated text may go to this record at all (STOP – Review, a no-contact owner), or None."""
+    keys = {_tag_key(t) for t in det.get("tags") or []}
+    if _tag_key(STOP_REVIEW_TAG[1]) in keys:
+        return f"tagged {STOP_REVIEW_TAG[1]!r} (P1 is reviewing a STOP)"
+    return NO_DIRECT_OUTREACH.get((det.get("owner") or {}).get("uuid"))
+
+
+def enroll_block(det: dict) -> str | None:
+    """Why this record can't start a new campaign (top-up, am-start, extra numbers), or None."""
+    if why := outreach_block(det):
+        return why
+    if _tag_key(POST_SEQ_HOLD_TAG[1]) in {_tag_key(t) for t in det.get("tags") or []}:
+        return f"tagged {POST_SEQ_HOLD_TAG[1]!r} (finished its sequence)"
+    return None
+
+
+def review_tags_problem(api) -> str | None:
+    """None when both P1 review tags exist under their expected titles, else why not. Callers that
+    enroll fail closed on a problem: a renamed or deleted tag would otherwise match nothing."""
+    try:
+        resp = api.call("/api/internal/tag/?offset=0&limit=10000&ordering=title")
+    except RuntimeError as e:
+        return f"tag list unreadable: {str(e)[:80]}"
+    rows = (resp.get("results") or resp.get("data") or []) if isinstance(resp, dict) else (resp or [])
+    titles = {t.get("uuid"): t.get("title") for t in rows}
+    bad = [f"{title!r} ({uuid[:8]}) is {titles.get(uuid)!r}" for uuid, title in (STOP_REVIEW_TAG, POST_SEQ_HOLD_TAG)
+           if _tag_key(titles.get(uuid)) != _tag_key(title)]
+    return ("review tag missing or renamed: " + "; ".join(bad)) if bad else None
 
 
 def stop_policy(owner: dict, phones: dict, origins: dict | None) -> dict:
@@ -411,6 +458,8 @@ def plan_pm_texts(models: list[dict], day: str, caller: str, already_sent: set[s
                 why = f"number now {(m['phones'].get(n) or {}).get('status')}"
             elif stop["hold"] or _d10(n) in stop["blocked"]:
                 why = f"STOP policy hold ({stop['why'] or 'number DNC'})"
+            elif m.get("blocked"):
+                why = f"no automated outreach: {m['blocked']}"
             elif any(s["to"] == n and s["from"] in DRIP_LINES for s in m["sms_out"]):
                 why = "drip already texted this number today"
             elif (m["phones"].get(n) or {}).get("type") not in (None, "", "MOBILE"):
@@ -948,6 +997,8 @@ def am_start_gate(det: dict, stop: dict, drips: list[dict] | None, batch_tag: st
     phones = {ph["number"]: ph for ph in (owner.get("phones") or [])}
     lines = [t for t in (det.get("tags") or []) if t in SMS_LINE_TAGS]
     primary = _primary_num(owner)
+    if why := enroll_block(det):
+        return why
     if det.get("status"):
         return f"record already has status {det.get('status')!r} (only clean records start)"
     if batch_tag and batch_tag not in (det.get("tags") or []):
@@ -1056,6 +1107,7 @@ def run_am_start(args) -> int:
         return 0
     api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
     marker, problem = load_ready_file(args.ready_file, batch_date)
+    problem = problem or review_tags_problem(api)
     if live and problem:
         return _alert(args, f":x: Morning start {day}: NOT launched. {problem}. No record was changed.")
     state_file = STATE_DIR / f"am_start_{day}.json"
@@ -1199,7 +1251,9 @@ def plan_extra_texts(api: Sift, prior_line_counts: Counter | None = None, ledger
         lines = [t for t in (det.get("tags") or []) if t in SMS_LINE_TAGS]
         base = {"uuid": u, "street": street, "owner_first": first, "line": lines[0] if len(lines) == 1 else None}
         why = None
-        if det.get("assigned_to") != CALLER_USER_UUID:
+        if blocked := enroll_block(det):
+            why = blocked
+        elif det.get("assigned_to") != CALLER_USER_UUID:
             why = "not assigned to the caller"
         elif not first:
             why = "owner has no first name"

@@ -41,8 +41,8 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pm_text_sender import (  # noqa: E402
-    CALLER_EMAIL, CALLER_USER_UUID, PRESET_01_TITLE, STATE_DIR, Sift, _best_primary, _env, _google_chat, _in_window, _slack,
-    ct_now, drip_rows, load_day, record_stop,
+    CALLER_EMAIL, CALLER_USER_UUID, POST_SEQ_HOLD_TAG, PRESET_01_TITLE, STATE_DIR, STOP_REVIEW_TAG, Sift, _best_primary,
+    _env, _google_chat, _in_window, _slack, ct_now, drip_rows, enroll_block, load_day, record_stop, review_tags_problem,
 )
 
 PRESET_01_UUID = "4881671f-526c-440f-add2-97564c89d069"
@@ -84,6 +84,8 @@ def skip_reason(d: dict) -> str | None:
     """Why a property detail can't go into the batch, or None if it can (phone checked separately)."""
     tags = [t if isinstance(t, str) else (t.get("title") or "") for t in (d.get("tags") or [])]
     o = d.get("owner") or {}
+    if enroll_block(d):
+        return "excluded (STOP review / post-sequence hold / no direct outreach)"
     if d.get("assigned_to"):
         return "assigned"
     if d.get("status"):
@@ -134,10 +136,14 @@ def plan(api: Sift, target: int) -> dict:
     if not p1_uuid:
         sys.exit(f"Tag '{P1_TAG}' not found")
 
-    base = dict(p01["filters"]["must"])
+    base = copy.deepcopy(p01["filters"]["must"])
     for k in ("any_tags", "assigned_to", "predictivecall_attempts"):
         base.pop(k, None)
     base["phone"] = 1
+    # P1's review tags stay out of the search even before preset 01 carries them; skip_reason()
+    # checks each detail again.
+    never = base.setdefault("must_not", {}).setdefault("any_tags", [])
+    never += [u for u, _ in (STOP_REVIEW_TAG, POST_SEQ_HOLD_TAG) if u not in never]
 
     # Work the used rungs first (leftovers), then add new rungs one at a time until the batch fills.
     eligible, mail_only, skipped, seen, pool_by_rung, added = [], [], Counter(), set(), {}, []
@@ -177,7 +183,9 @@ def plan(api: Sift, target: int) -> dict:
                    "address": addr.get("street") if isinstance(addr, dict) else addr,
                    "best_phone": _best_primary({p["number"]: p for p in (o.get("phones") or [])}),
                    "current_primary": o.get("primary_phone")}
-            if rec["best_phone"]:
+            if rec["best_phone"] and any(e["best_phone"] == rec["best_phone"] or (rec["owner_uuid"] and e["owner_uuid"] == rec["owner_uuid"]) for e in eligible):
+                skipped["owner or number already in batch"] += 1
+            elif rec["best_phone"]:
                 eligible.append(rec)
                 took += 1
             else:
@@ -351,9 +359,10 @@ def apply(api: Sift, p: dict, batch_date: str, force: bool = False) -> str:
 def validate(api: Sift, batch_date: str) -> tuple[dict, str]:
     """Re-read every record in the saved plan and write the readiness marker am-start needs.
     A record is ready only if the write landed (assigned, Batch + one line tag, primary set, no
-    status), the STOP policy allows it, its primary is not DNC, and it has no drip history.
-    ok=False (Monday launches nothing) when the plan is missing, any record can't be read, or no
-    record is ready."""
+    status), the STOP policy allows it, its primary is not DNC, it has no drip history, it carries
+    no exclusion tag, and no other batch record shares its primary number or owner.
+    ok=False (Monday launches nothing) when the plan is missing, the exclusion tags can't be
+    confirmed, any record can't be read, or no record is ready. An excluded record just drops out."""
     batch_title = f"Batch {batch_date}"
     marker = {"ok": False, "batch_date": batch_date, "checked": ct_now().isoformat(), "uuids": [], "lines": {},
               "excluded": {}, "problem": None}
@@ -363,10 +372,20 @@ def validate(api: Sift, batch_date: str) -> tuple[dict, str]:
     except (OSError, ValueError, KeyError) as e:
         el, marker["problem"] = [], f"plan {plan_file.name} unreadable: {e}"
     unread = []
+    # Fail closed when the exclusion tags can't be confirmed: a renamed tag would match nothing.
+    if not marker["problem"]:
+        marker["problem"] = review_tags_problem(api)
+    numbers, owners = Counter(digits(r.get("best_phone")) for r in el), Counter(r.get("owner_uuid") for r in el)
     for rec in el:
         try:
             d = api.call(f"/api/internal/property/{rec['uuid']}/")
             problems = check(api, rec, batch_title, d)
+            if why := enroll_block(d):
+                problems.append(why)
+            if numbers[digits(rec.get("best_phone"))] > 1:
+                problems.append(f"primary ...{digits(rec.get('best_phone'))[-4:]} is on {numbers[digits(rec.get('best_phone'))]} batch records")
+            if rec.get("owner_uuid") and owners[rec["owner_uuid"]] > 1:
+                problems.append(f"owner has {owners[rec['owner_uuid']]} batch records")
             stop = record_stop(api, rec["uuid"], d)
             if stop["hold"]:
                 problems.append(f"STOP hold ({stop['why']})")
