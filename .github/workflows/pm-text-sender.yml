@@ -54,9 +54,11 @@ on:
 
 jobs:
   am-start:
-    # 9:50 AM Central: sets every record in preset "01. New - Set to Prospecting"
-    # to Prospecting, which fires the morning-text drip. Replaces Rahaf's 10:00
-    # Select All. Dry run until the repo variable AM_START_LIVE is "true".
+    # 9:50 AM Central, Mondays only when live: sets the records the top-up
+    # run validated (topup_ready_<today>.json) to Prospecting, which
+    # fires the morning-text drip, within each line's room for the day. No
+    # marker, unreadable line counts, or a non-Monday = nothing started.
+    # Dry run until the repo variable AM_START_LIVE is "true".
     if: >-
       github.event.schedule == '50 14 * * 1-5' || github.event.schedule == '50 15 * * 1-5'
       || (github.event_name == 'workflow_dispatch' && inputs.mode == 'am-start')
@@ -82,6 +84,20 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: python src/workflow_run_guard.py am-start 09:40-12:00 "Start morning texts"
+      - name: Download Friday readiness marker
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          WANT="topup_ready_$(TZ=America/Chicago date +%F).json"
+          mkdir -p output/pm_texts/friday
+          for RUN in $(gh run list --repo "$GITHUB_REPOSITORY" --workflow weekly-topup.yml --status success --limit 10 --json databaseId -q '.[].databaseId' || true); do
+            rm -rf output/pm_texts/friday/*
+            gh run download "$RUN" --repo "$GITHUB_REPOSITORY" -n "weekly-topup-$RUN" -D output/pm_texts/friday 2>/dev/null || continue
+            F=$(find output/pm_texts/friday -name "$WANT" | head -1)
+            if [ -n "$F" ]; then cp "$F" output/pm_texts/; echo "readiness marker $WANT from weekly-topup run $RUN"; break; fi
+          done
+          ls "output/pm_texts/$WANT" 2>/dev/null || echo "no $WANT found (am-start will not launch)"
       - name: Start morning texts (dry run unless AM_START_LIVE is "true")
         env:
           REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
@@ -89,16 +105,10 @@ jobs:
           LIVE: ${{ vars.AM_START_LIVE }}
         if: steps.guard.outputs.skip != 'true'
         run: |
-          ARGS="am-start --slack"
+          ARGS="am-start --slack --ready-file output/pm_texts/topup_ready_$(TZ=America/Chicago date +%F).json"
           if [ "$LIVE" = "true" ]; then ARGS="$ARGS --send"; fi
           if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 09:40-12:00"; fi
           python src/pm_text_sender.py $ARGS
-      - name: One-off Mon 2026-10-26 re-enroll of 3 records (self-gated to 09:45-10:30 Central that day; remove after)
-        if: always()
-        env:
-          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: python scripts/reenroll_monday_2026-10-26.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:

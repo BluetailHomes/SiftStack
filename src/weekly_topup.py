@@ -13,6 +13,7 @@ Modes
   python src/weekly_topup.py plan --batch-date 2026-11-02 --target 72 --slack
   python src/weekly_topup.py apply                   # same plan, still writes nothing without --live
   python src/weekly_topup.py apply --live --only-between 18:00-20:00 --slack
+  python src/weekly_topup.py validate --slack        # Friday: re-read the batch, write the readiness marker
 
 Env: REISIFT_API_KEY; SLACK_WEBHOOK_URL / GOOGLE_CHAT_WEBHOOK_URL for --slack.
 
@@ -24,6 +25,9 @@ Safety rules
     plan can't look like a batch still waiting to be written.
   - Every write is logged to output/account_backups/topup_write_{date}.json, even on a crash.
   - Status is never set here; am-start owns the status flip (it starts the drip).
+  - `validate` re-reads every written record and writes output/pm_texts/topup_ready_{date}.json.
+    Monday's am-start launches only the records listed there, and nothing when the file is
+    missing or not ok, so any failed Friday step means no Monday launch.
 """
 from __future__ import annotations
 
@@ -38,7 +42,7 @@ from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pm_text_sender import (  # noqa: E402
     CALLER_EMAIL, CALLER_USER_UUID, PRESET_01_TITLE, STATE_DIR, Sift, _best_primary, _env, _google_chat, _in_window, _slack,
-    ct_now, load_day,
+    ct_now, drip_rows, load_day, record_stop,
 )
 
 PRESET_01_UUID = "4881671f-526c-440f-add2-97564c89d069"
@@ -54,9 +58,9 @@ RUNGS = [
     "Senior + Vacant - 23.0 doors per deal",
     "Absentee + Vacant - 23.8 doors per deal",
 ]
-DEFAULT_TARGET = 72
+DEFAULT_TARGET = 45                  # temporary reduced cohort (approved 2026-10-27)
 LINES = ("A", "B", "C", "D", "E")   # even round-robin (D/E ran a light 8-each first week on 10/26)
-LINE_CAP = 20                        # new records per SMS line per day
+LINE_CAP = 9                         # new records per SMS line per Monday; am-start may start fewer
 MAIL_ONLY_TAG = "Mail Only"
 TAG_CHUNK = 50
 BACKUP_DIR = STATE_DIR.parent / "account_backups"
@@ -154,6 +158,15 @@ def plan(api: Sift, target: int) -> dict:
             seen.add(u)
             d = api.call(f"/api/internal/property/{u}/")
             why = skip_reason(d)
+            if not why:
+                stop = record_stop(api, u, d)
+                if stop["hold"]:
+                    why = "STOP policy hold"
+            if not why:
+                try:
+                    why = "has drip history" if drip_rows(api, u) else None
+                except RuntimeError:
+                    why = "drip history unreadable"
             if why:
                 skipped[why] += 1
                 continue
@@ -249,8 +262,8 @@ def add_tags(api: Sift, uuids: list[str], titles: list[str]) -> int:
     return n
 
 
-def check(api: Sift, rec: dict, batch_title: str) -> list[str]:
-    d = api.call(f"/api/internal/property/{rec['uuid']}/")
+def check(api: Sift, rec: dict, batch_title: str, d: dict | None = None) -> list[str]:
+    d = d or api.call(f"/api/internal/property/{rec['uuid']}/")
     tags = [t if isinstance(t, str) else t.get("title") for t in (d.get("tags") or [])]
     lines = [t for t in tags if t and t.startswith("SMS Line")]
     a = d.get("assigned_to")
@@ -335,6 +348,60 @@ def apply(api: Sift, p: dict, batch_date: str, force: bool = False) -> str:
     return "\n".join(out)
 
 
+def validate(api: Sift, batch_date: str) -> tuple[dict, str]:
+    """Re-read every record in the saved plan and write the readiness marker am-start needs.
+    A record is ready only if the write landed (assigned, Batch + one line tag, primary set, no
+    status), the STOP policy allows it, its primary is not DNC, and it has no drip history.
+    ok=False (Monday launches nothing) when the plan is missing, any record can't be read, or no
+    record is ready."""
+    batch_title = f"Batch {batch_date}"
+    marker = {"ok": False, "batch_date": batch_date, "checked": ct_now().isoformat(), "uuids": [], "lines": {},
+              "excluded": {}, "problem": None}
+    plan_file = STATE_DIR / f"topup_plan_{batch_date}.json"
+    try:
+        el = json.loads(plan_file.read_text(encoding="utf-8"))["eligible"]
+    except (OSError, ValueError, KeyError) as e:
+        el, marker["problem"] = [], f"plan {plan_file.name} unreadable: {e}"
+    unread = []
+    for rec in el:
+        try:
+            d = api.call(f"/api/internal/property/{rec['uuid']}/")
+            problems = check(api, rec, batch_title, d)
+            stop = record_stop(api, rec["uuid"], d)
+            if stop["hold"]:
+                problems.append(f"STOP hold ({stop['why']})")
+            if digits((d.get("owner") or {}).get("primary_phone")) in stop["blocked"]:
+                problems.append("primary DNC")
+            if drip_rows(api, rec["uuid"]):
+                problems.append("has drip history")
+        except RuntimeError as e:
+            unread.append(rec["uuid"])
+            problems = [f"unreadable: {str(e)[:80]}"]
+        if problems:
+            marker["excluded"][rec["uuid"]] = problems
+        else:
+            marker["uuids"].append(rec["uuid"])
+            marker["lines"][rec["uuid"]] = f"SMS Line {rec['line']}"
+    per_line = Counter(marker["lines"].values())
+    if not marker["problem"]:
+        if unread:
+            marker["problem"] = f"{len(unread)} records unreadable"
+        elif max(per_line.values(), default=0) > LINE_CAP:
+            marker["problem"] = f"line load {dict(per_line)} exceeds {LINE_CAP}"
+        elif not marker["uuids"]:
+            marker["problem"] = "no record passed validation"
+    marker["ok"] = not marker["problem"]
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    (STATE_DIR / f"topup_ready_{batch_date}.json").write_text(json.dumps(marker, indent=1), encoding="utf-8")
+    head = (f":white_check_mark: Monday {batch_date} preview: {len(marker['uuids'])} records ready to start at 9:50 AM CT"
+            if marker["ok"] else f":x: Monday {batch_date} will NOT launch: {marker['problem']}")
+    out = [head, "  By line (ceiling; Monday starts fewer if a line has less room): " +
+           (", ".join(f"{k[4:]} {v}" for k, v in sorted(per_line.items())) or "none")]
+    for u, why in list(marker["excluded"].items())[:15]:
+        out.append(f"  EXCLUDED {u[:8]}: {', '.join(why)}")
+    return marker, "\n".join(out)
+
+
 def kpi_week(api: Sift, batch_date: str) -> str:
     """Weekly KPI section for the Mon-Fri before `batch_date` (Slack only)."""
     try:
@@ -351,7 +418,8 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     pp = sub.add_parser("plan", help="dry run: build Monday's batch and report it")
     pa = sub.add_parser("apply", help="build the batch and write it (only with --live)")
-    for s in (pp, pa):
+    pv = sub.add_parser("validate", help="re-read the written batch and write Monday's readiness marker")
+    for s in (pp, pa, pv):
         s.add_argument("--batch-date", help="Monday the batch starts (default: next Monday, Central)")
         s.add_argument("--target", type=int, default=DEFAULT_TARGET)
         s.add_argument("--slack", action="store_true", help="post the report to Slack and Google Chat")
@@ -366,6 +434,13 @@ def main() -> int:
     live = args.cmd == "apply" and args.live
     api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
     batch_date = args.batch_date or next_monday(ct_now().date()).isoformat()
+    if args.cmd == "validate":
+        marker, text = validate(api, batch_date)
+        print(text)
+        if args.slack:
+            _slack(text)
+            _google_chat(text)
+        return 0 if marker["ok"] else 1
     p = plan(api, args.target)
     exists = f"Batch {batch_date}" in tag_uuids(api)
     text = report(p, batch_date, args.target, live=live, batch_exists=exists,

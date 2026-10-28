@@ -135,7 +135,7 @@ def test_correct_dnc_also_skips_record():
     det = _det([_phone(PRIMARY), _phone("8165550002", status="CORRECT_DNC"), _phone(EXTRA)])
     planned, skipped, _ = _plan(_api({"p1": det}))
     assert planned == []
-    assert skipped[0]["why"] == "owner's number already confirmed Correct"
+    assert skipped[0]["why"] == "STOP policy hold (ambiguous STOP on ...0002 (was unknown))"
 
 
 def test_record_level_skips():
@@ -149,7 +149,7 @@ def test_record_level_skips():
     assert [s["why"] for s in skipped] == [
         "not assigned to the caller",
         "needs exactly one SMS Line tag (has 2)",
-        "owner DNC/opt-out",
+        "STOP policy hold (owner DNC/opt-out)",
     ]
 
 

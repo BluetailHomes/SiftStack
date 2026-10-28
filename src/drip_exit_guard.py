@@ -44,6 +44,7 @@ titles whose records are guarded; default "Priority 1").
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -144,6 +145,22 @@ def primary_phone_is_wrong(key: str, property_uuid: str) -> bool:
     return False
 
 
+def phone_stop_reason(key: str, property_uuid: str) -> str | None:
+    """Why a record with a DNC-marked phone must leave its drip, or None to leave it running."""
+    import pm_text_sender as pts
+    try:
+        api = pts.Sift(key)
+        det = api.call(f"/api/internal/property/{property_uuid}/")
+        stop = pts.record_stop(api, property_uuid, det)
+    except Exception as e:  # noqa: BLE001
+        return f"STOP check unreadable ({str(e)[:80]})"
+    if stop["hold"]:
+        return f"STOP policy: {stop['why']}"
+    if pts._primary_num(det.get("owner") or {}) in stop["blocked"]:
+        return "primary phone DNC"
+    return None
+
+
 def running_drips(key: str, property_uuid: str) -> list[dict]:
     d = _get(key, f"/api/internal/drip-campaign-history/by-property/?property_uuid={property_uuid}")
     return [h for h in (d.get("results") or []) if h.get("status") == "running"]
@@ -178,6 +195,10 @@ def run(key: str, tags: list[str], dry_run: bool) -> dict:
     # opt-out, or any phone on the record carrying a DNC status (a STOP reply
     # synced from smrtPhone, or a litigator number marked DNC by hand), must
     # never keep receiving automated texts.
+    # A DNC mark on some phone is not by itself an owner opt-out (pm_text_sender's STOP policy,
+    # 2026-10-27): the drip only texts the primary, so it stops when the owner opted out, the STOP
+    # is ambiguous (held for review), or the primary itself is DNC. A record that can't be read
+    # is stopped anyway (fail safe).
     seen = {r["uuid"] for r in rows}
     for extra in (
         {"any_tags": tuuids, "dnc": 1},
@@ -186,10 +207,17 @@ def run(key: str, tags: list[str], dry_run: bool) -> dict:
     ):
         try:
             for r in search_records(key, extra):
-                if r["uuid"] not in seen:
-                    seen.add(r["uuid"])
+                if r["uuid"] in seen:
+                    continue
+                if "any_phone_status" in extra:
+                    why = phone_stop_reason(key, r["uuid"])
+                    if not why:
+                        continue
+                    r["_reason"] = why
+                else:
                     r["_reason"] = "dnc/opt-out"
-                    rows.append(r)
+                seen.add(r["uuid"])
+                rows.append(r)
         except Exception as e:  # noqa: BLE001
             LOG.warning("opt-out search failed for %s: %s", extra, e)
     # Primary phone marked WRONG/DEAD while the record is still prospecting: the drip texts the
@@ -286,6 +314,61 @@ def run_one(key: str, property_uuid: str, mark_wrong: str | None, note: str | No
     return stats
 
 
+def run_friday(key: str, live: bool, slack: bool) -> int:
+    """Friday prep: classify every P1 morning-text drip, and stop only the weekend-bound ones.
+
+    completed      all five texts sent (or DataSift says completed): nothing to do
+    delayed        next text is due today (late, maybe after 7 PM): leave it; DataSift sends it
+    weekend-bound  next text falls on Saturday or Sunday: remove (only with --live)
+    later-weekday  next text is a later weekday: leave it
+    failed/other   not running: listed for review, never touched
+    A drip whose remaining texts would spill into the weekend is flagged needs_review, not removed."""
+    import pm_text_sender as pts
+    now = pts.ct_now()
+    try:
+        rows = pts.drip_histories(pts.Sift(key))
+    except Exception as e:  # noqa: BLE001
+        msg = f":x: Friday drip check {now:%Y-%m-%d}: drip histories unreadable ({str(e)[:200]}). Friday prep stops here."
+        print(msg)
+        if slack:
+            pts._slack(msg)
+        return 1
+    found = []
+    for h in rows:
+        c = pts.classify_drip(h, now)
+        found.append({**c, "property": h.get("property"), "started_at": h.get("started_at")})
+    groups: dict[str, list[dict]] = {}
+    for c in found:
+        groups.setdefault(c["state"], []).append(c)
+    removed, failed = [], []
+    for c in groups.get("weekend-bound", []):
+        if live:
+            (removed if remove_history(key, c["history_uuid"]) else failed).append(c)
+    out = [f"Friday drip check {now:%a %Y-%m-%d %H:%M} CT ({'LIVE' if live else 'DRY RUN'}): {len(found)} P1 drips; "
+           + ", ".join(f"{k} {len(v)}" for k, v in sorted(groups.items()))]
+    for state in ("delayed", "weekend-bound", "failed", "unknown"):
+        for c in groups.get(state, []):
+            out.append(f"  {state.upper():13} {c['line'] or '?'} | property {c['property']} | sent {c['sent']}/{pts.DRIP_SENDS}"
+                       f" | next {c['next'] or '-'}{' (after 7 PM)' if c['after_hours'] else ''}")
+    review = [c for c in found if c["needs_review"] and c["state"] not in ("failed",)]
+    for c in review:
+        out.append(f"  REVIEW        {c['line'] or '?'} | property {c['property']} | {c['state']}, sent {c['sent']}, next {c['next']}")
+    if live:
+        out.append(f"Removed {len(removed)} weekend-bound drips; {len(failed)} removals failed")
+    elif groups.get("weekend-bound"):
+        out.append(f"Dry run: would remove {len(groups['weekend-bound'])} weekend-bound drips")
+    report = "\n".join(out)
+    print(report)
+    pts.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    (pts.STATE_DIR / f"friday_drips_{now:%Y-%m-%d}.json").write_text(json.dumps(
+        {"live": live, "at": now.isoformat(), "drips": found,
+         "removed": [c["history_uuid"] for c in removed], "failed": [c["history_uuid"] for c in failed]},
+        indent=1, default=str), encoding="utf-8")
+    if slack:
+        pts._slack(report)
+    return 1 if failed else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--dry-run", action="store_true", help="report only, delete nothing")
@@ -294,6 +377,10 @@ def main() -> int:
     ap.add_argument("--note", help="with --property: message-board note to leave on the record")
     ap.add_argument("--tags", default=os.environ.get("DRIP_GUARD_TAGS", "Priority 1"),
                     help="comma-separated tag titles to guard (default: Priority 1)")
+    ap.add_argument("--friday", action="store_true",
+                    help="Friday prep: classify P1 drips; report only unless --live")
+    ap.add_argument("--live", action="store_true", help="with --friday: remove weekend-bound drips")
+    ap.add_argument("--slack", action="store_true", help="with --friday: post the report to Slack")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
@@ -302,6 +389,8 @@ def main() -> int:
     if not key:
         LOG.error("REISIFT_API_KEY is not set")
         return 2
+    if a.friday:
+        return run_friday(key, a.live, a.slack)
     if a.property:
         stats = run_one(key, a.property, a.mark_wrong, a.note, a.dry_run)
         LOG.info("Done: %s", stats)

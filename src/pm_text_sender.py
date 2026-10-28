@@ -97,8 +97,8 @@ def _central_offset(when_utc: dt.datetime) -> dt.timedelta:
 
 def to_ct(ts: str) -> dt.datetime | None:
     try:
-        u = dt.datetime.strptime(ts[:19], "%Y-%m-%d %H:%M:%S")
-    except ValueError:
+        u = dt.datetime.strptime(ts[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S")   # UTC, "T" or space
+    except (ValueError, TypeError):
         return None
     return (u + _central_offset(u)).replace(tzinfo=dt.timezone(_central_offset(u)))
 
@@ -182,16 +182,24 @@ def _actor(e: dict) -> str:
     return _who(e)
 
 
-def load_day(api: Sift, day: str, caller: str) -> list[dict]:
-    """Every record with activity on `day` (Central), modelled for the rules below."""
+def load_day(api: Sift, day: str, caller: str, stats: dict | None = None) -> list[dict]:
+    """Every record with activity on `day` (Central), modelled for the rules below.
+    `stats`, when given, is filled with {"selected", "skipped", "errors"}: records the search
+    returned, records dropped because their logs or detail could not be read, and failed
+    source queries (the caller adds its own). A skipped record never stops the day."""
+    stats = stats if stats is not None else {}
+    for k in ("selected", "skipped", "errors"):
+        stats.setdefault(k, 0)
     d0 = dt.date.fromisoformat(day)
     rows = api.search({"property_type": "clean", "updated": [(d0 - dt.timedelta(days=1)).isoformat(), (d0 + dt.timedelta(days=1)).isoformat()]})
+    stats["selected"] += len(rows)
     models = []
     for rec in rows:
         u = rec.get("uuid")
         try:
             evs = (api.call(f"/api/internal/property/{u}/logs/?limit=250&offset=0") or {}).get("results") or []
         except RuntimeError:
+            stats["skipped"] += 1
             continue
         today, all_call_days = [], set()
         for e in evs:
@@ -208,45 +216,53 @@ def load_day(api: Sift, day: str, caller: str) -> list[dict]:
         if not today:
             continue
         today.sort(key=lambda e: e["_ct"])
-        det = api.call(f"/api/internal/property/{u}/")
-        owner = det.get("owner") or {}
-        phones = {p["number"]: p for p in (owner.get("phones") or [])}
-        for so in det.get("secondary_owners") or []:
-            for p in so.get("phones") or []:
-                phones.setdefault(p["number"], p)
-        calls: dict[str, dict] = {}
-        for e in today:
-            et = e["event_type"]
-            if et.startswith("owner.call."):
-                c = e["payload"]["call"]
-                cc = calls.setdefault(c["uuid"], {"ct": e["_ct"], "from": c.get("origin_number") or "", "to": c.get("destination_number") or "",
-                                                  "dir": c.get("direction"), "by": (c.get("external_user") or {}).get("email"), "dur": None, "result": None, "rec": None})
-                if et == "owner.call.answered":
-                    cc.update(result="answered", dur=c.get("duration"), rec=c.get("recording"))
-                elif et == "owner.call.noanswer":
-                    cc["result"] = "noanswer"
-                elif et in ("owner.call.missed", "owner.call.received"):
-                    cc["result"] = "inbound"
-        m = {
-            "uuid": u, "street": (det.get("address") or {}).get("street") or "", "status": det.get("status"),
-            "assigned_to": det.get("assigned_to"), "tags": det.get("tags") or [], "attempts": det.get("predictivecall_attempts") or 0,
-            "owner_first": (owner.get("first_name") or "").strip(), "owner_dnc": bool(owner.get("dnc")), "owner_opt_out": bool(owner.get("opt_out")),
-            "phones": phones, "open_tasks": rec.get("tasks") if isinstance(rec.get("tasks"), int) else None,
-            "calls": sorted(calls.values(), key=lambda c: c["ct"]), "call_days": all_call_days,
-            "sms_out": [{"ct": e["_ct"], "from": e["payload"]["sms"].get("origin_number") or "", "to": e["payload"]["sms"].get("destination_number") or "",
-                         "manual": bool((e["payload"]["sms"].get("external_user") or {}).get("email")),
-                         "by": (e["payload"]["sms"].get("external_user") or {}).get("email")} for e in today if e["event_type"] == "owner.sms.sent"],
-            "sms_in": [{"ct": e["_ct"], "from": e["payload"]["sms"].get("origin_number") or "", "text": e["payload"]["sms"].get("message") or ""}
-                       for e in today if e["event_type"] == "owner.sms.received"],
-            "marks": [{"ct": e["_ct"], "phone": e["payload"]["owner"].get("phone"), "frm": (e["payload"]["owner"].get("status") or [None, None])[0], "to": (e["payload"]["owner"].get("status") or [None, None])[-1], "by": _who(e)}
-                      for e in today if e["event_type"] == "owner.phone.status.updated"],
-            "status_changes": [{"ct": e["_ct"], "to": (e["payload"]["property"].get("status") or [None, None])[-1], "by": _who(e)} for e in today if e["event_type"] == "property.status.updated"],
-            "attempt_bumps": [e["_ct"] for e in today if e["event_type"] == "property.predictivecall.attempts.increased" and _who(e) == caller],
-            "notes": [e["_ct"] for e in today if e["event_type"] in ("property.message.added", "property.message.updated") and _who(e) == caller],
-            "actions": [e["_ct"] for e in today if _actor(e) == caller],
-            "task_events": sum(1 for e in today if "task" in e["event_type"] and _actor(e) == caller),
-            "tags_added": [(t, _who(e)) for e in today if e["event_type"] == "property.tags.added" for t in ((e.get("payload") or {}).get("tags") or [])],
-        }
+        try:
+            det = api.call(f"/api/internal/property/{u}/")
+        except RuntimeError:
+            stats["skipped"] += 1
+            continue
+        try:
+            # A malformed log row or detail costs that one record, not the whole day.
+            owner = det.get("owner") or {}
+            phones = _all_phones(det)
+            calls: dict[str, dict] = {}
+            for e in today:
+                et = e["event_type"]
+                if et.startswith("owner.call."):
+                    c = e["payload"]["call"]
+                    cc = calls.setdefault(c["uuid"], {"ct": e["_ct"], "id": c.get("external_id"), "from": c.get("origin_number") or "", "to": c.get("destination_number") or "",
+                                                      "dir": c.get("direction"), "by": (c.get("external_user") or {}).get("email"), "dur": None, "result": None, "rec": None})
+                    if et == "owner.call.answered":
+                        cc.update(result="answered", dur=c.get("duration"), rec=c.get("recording"))
+                    elif et == "owner.call.noanswer":
+                        cc["result"] = "noanswer"
+                    elif et in ("owner.call.missed", "owner.call.received"):
+                        cc["result"] = "inbound"
+            m = {
+                "uuid": u, "street": (det.get("address") or {}).get("street") or "", "status": det.get("status"),
+                "assigned_to": det.get("assigned_to"), "tags": det.get("tags") or [], "attempts": det.get("predictivecall_attempts") or 0,
+                "owner_first": (owner.get("first_name") or "").strip(), "owner_dnc": bool(owner.get("dnc")), "owner_opt_out": bool(owner.get("opt_out")),
+                "phones": phones, "stop": stop_policy(owner, phones, dnc_origins(evs)),
+                "primary": _d10((owner.get("primary_phone") or {}).get("number") if isinstance(owner.get("primary_phone"), dict) else owner.get("primary_phone")),
+                "open_tasks": rec.get("tasks") if isinstance(rec.get("tasks"), int) else None,
+                "calls": sorted(calls.values(), key=lambda c: c["ct"]), "call_days": all_call_days,
+                "sms_out": [{"ct": e["_ct"], "from": e["payload"]["sms"].get("origin_number") or "", "to": e["payload"]["sms"].get("destination_number") or "",
+                             "manual": bool((e["payload"]["sms"].get("external_user") or {}).get("email")),
+                             "by": (e["payload"]["sms"].get("external_user") or {}).get("email")} for e in today if e["event_type"] == "owner.sms.sent"],
+                "sms_in": [{"ct": e["_ct"], "from": e["payload"]["sms"].get("origin_number") or "", "text": e["payload"]["sms"].get("message") or ""}
+                           for e in today if e["event_type"] == "owner.sms.received"],
+                "marks": [{"ct": e["_ct"], "phone": e["payload"]["owner"].get("phone"), "frm": (e["payload"]["owner"].get("status") or [None, None])[0], "to": (e["payload"]["owner"].get("status") or [None, None])[-1], "by": _who(e)}
+                          for e in today if e["event_type"] == "owner.phone.status.updated"],
+                "status_changes": [{"ct": e["_ct"], "to": (e["payload"]["property"].get("status") or [None, None])[-1], "by": _who(e)} for e in today if e["event_type"] == "property.status.updated"],
+                "attempt_bumps": [e["_ct"] for e in today if e["event_type"] == "property.predictivecall.attempts.increased" and _who(e) == caller],
+                "notes": [e["_ct"] for e in today if e["event_type"] in ("property.message.added", "property.message.updated") and _who(e) == caller],
+                "actions": [e["_ct"] for e in today if _actor(e) == caller],
+                "task_events": sum(1 for e in today if "task" in e["event_type"] and _actor(e) == caller),
+                "tags_added": [(t, _who(e)) for e in today if e["event_type"] == "property.tags.added" for t in ((e.get("payload") or {}).get("tags") or [])],
+            }
+        except (KeyError, TypeError, AttributeError, ValueError):
+            stats["skipped"] += 1
+            continue
         models.append(m)
     return models
 
@@ -269,6 +285,80 @@ DNC_MARKS = {"DNC", "CORRECT_DNC", "WRONG_DNC"}
 
 def is_stop(text: str) -> bool:
     return bool(_STOP_RE.match(re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", text or "")).strip()))
+
+
+# ----------------------------------------------------------------- STOP policy
+# One rule for every job that reaches out (eligibility, top-up, am-start, pm-texts, extra-texts,
+# drip guard, calling review list):
+#   confirmed owner STOP   (owner DNC/opt-out, a CORRECT_DNC number, or DNC on a number that was
+#                           CORRECT)                       -> suppress all outreach to the owner
+#   confirmed wrong-number STOP (WRONG_DNC)                -> suppress that number only
+#   ambiguous STOP (plain DNC on a number never confirmed) -> suppress that number, hold the
+#                                                             record for human review
+# A DNC phone whose history can't be read counts as ambiguous, so the rule fails safe.
+def dnc_origins(evs: list[dict]) -> dict[str, str | None]:
+    """{phone: status it had just before its latest move into a DNC mark} from property logs."""
+    out = {}
+    for e in sorted(evs, key=lambda e: e.get("timestamp") or ""):
+        if e.get("event_type") != "owner.phone.status.updated":
+            continue
+        o = (e.get("payload") or {}).get("owner") or {}
+        st = o.get("status") or [None, None]
+        old, new = (st[0], st[-1]) if isinstance(st, list) else (None, st)
+        if new in DNC_MARKS and old not in DNC_MARKS:
+            out[_d10(o.get("phone"))] = old
+    return out
+
+
+def stop_policy(owner: dict, phones: dict, origins: dict | None) -> dict:
+    """{owner_stop, blocked (numbers never to contact), review (numbers needing a human), hold, why}.
+    `phones` = {number: phone dict}; `origins` = dnc_origins() of the record's logs (None = unread)."""
+    blocked, review, why = set(), set(), []
+    owner_stop = bool(owner.get("dnc") or owner.get("opt_out"))
+    if owner_stop:
+        why.append("owner DNC/opt-out")
+    for n, ph in phones.items():
+        st = (ph.get("status") or "").upper()
+        if st not in DNC_MARKS:
+            continue
+        n = _d10(n)
+        blocked.add(n)
+        prior = (origins or {}).get(n)
+        if st == "WRONG_DNC":
+            continue
+        # A CORRECT_DNC mark alone is not proof the owner opted out: the SMS responder writes it
+        # for any STOP from a number not already marked Wrong/Dead. Only a number confirmed
+        # Correct before its STOP makes this an owner STOP; otherwise hold for identity review.
+        if prior == "CORRECT":
+            owner_stop = True
+            why.append(f"owner STOP on ...{n[-4:]}")
+        else:
+            review.add(n)
+            why.append(f"ambiguous STOP on ...{n[-4:]} (was {prior or 'unknown'})")
+    return {"owner_stop": owner_stop, "blocked": blocked, "review": review,
+            "hold": owner_stop or bool(review), "why": "; ".join(why)}
+
+
+def _all_phones(det: dict) -> dict:
+    owner = det.get("owner") or {}
+    phones = {p["number"]: p for p in (owner.get("phones") or [])}
+    for so in det.get("secondary_owners") or []:
+        for p in so.get("phones") or []:
+            phones.setdefault(p["number"], p)
+    return phones
+
+
+def record_stop(api: Sift, uuid: str, det: dict) -> dict:
+    """stop_policy() for a property detail; reads its logs only when a phone carries a DNC mark."""
+    phones = _all_phones(det)
+    origins = {}
+    if any((p.get("status") or "").upper() in DNC_MARKS for p in phones.values()):
+        try:
+            evs = (api.call(f"/api/internal/property/{uuid}/logs/?limit=250&offset=0") or {}).get("results") or []
+            origins = dnc_origins(evs)
+        except RuntimeError:
+            origins = None
+    return stop_policy(det.get("owner") or {}, phones, origins)
 
 
 def _eligible(p: dict) -> bool:
@@ -308,6 +398,7 @@ def plan_pm_texts(models: list[dict], day: str, caller: str, already_sent: set[s
             if c["by"] == caller and c["dir"] == "outbound" and c["result"] == "answered":
                 if c["to"] not in best or (c["dur"] or 0) > (best[c["to"]]["dur"] or 0):
                     best[c["to"]] = c
+        stop = m.get("stop") or stop_policy({"dnc": m.get("owner_dnc"), "opt_out": m.get("owner_opt_out")}, m["phones"], None)
         for n, c in best.items():
             if n in seen_numbers:
                 continue
@@ -318,8 +409,10 @@ def plan_pm_texts(models: list[dict], day: str, caller: str, already_sent: set[s
                 why = f"number not marked No Answer (mark={final_mark(m, n, caller)})"
             elif (m["phones"].get(n) or {}).get("status") in TERMINAL_MARKS:
                 why = f"number now {(m['phones'].get(n) or {}).get('status')}"
-            elif m["owner_dnc"] or m["owner_opt_out"]:
-                why = "owner flagged DNC/opt-out"
+            elif stop["hold"] or _d10(n) in stop["blocked"]:
+                why = f"STOP policy hold ({stop['why'] or 'number DNC'})"
+            elif any(s["to"] == n and s["from"] in DRIP_LINES for s in m["sms_out"]):
+                why = "drip already texted this number today"
             elif (m["phones"].get(n) or {}).get("type") not in (None, "", "MOBILE"):
                 # smrtPhone rejects a text to a landline/VoIP line with HTTP 400 (2 a day on
                 # 2026-10-21, both confirmed non-mobile by Trestle). A number with no type on
@@ -359,6 +452,92 @@ def plan_pm_texts(models: list[dict], day: str, caller: str, already_sent: set[s
     return to_send, skipped
 
 
+def running_drip(api: Sift, uuid: str) -> bool:
+    h = api.call(f"/api/internal/drip-campaign-history/by-property/?property_uuid={uuid}")
+    rows = h.get("results") if isinstance(h, dict) else h
+    return any(x.get("status") == "running" for x in rows or [])
+
+
+def drop_drip_primaries(api: Sift, to_send: list[dict], skipped: list[dict], models: list[dict]) -> list[dict]:
+    """The drip texts the record's primary phone every morning, so an afternoon text to that same
+    number would be a second text that day. A record whose drip state can't be read is held too."""
+    prim = {m["uuid"]: m.get("primary") for m in models}
+    keep = []
+    for e in to_send:
+        if _d10(e["to"]) != prim.get(e["uuid"]):
+            keep.append(e)
+            continue
+        try:
+            on_drip = running_drip(api, e["uuid"])
+        except RuntimeError as ex:
+            skipped.append({**e, "why": f"drip state unreadable, held ({str(ex)[:80]})"})
+            continue
+        if on_drip:
+            skipped.append({**e, "why": "primary phone is on a running drip (would double-text)"})
+        else:
+            keep.append(e)
+    return keep
+
+
+# ----------------------------------------------------------------- drip state
+# The P1 morning drip: 5 texts, one day apart, each 86400s after the last one actually went out,
+# so sends drift later every day. Its line comes from the drip's title ("... Morning Texts Line C ...").
+DRIP_SENDS = 5
+_DRIP_LINE_RE = re.compile(r"Morning Texts (Line [A-E])")
+
+
+def drip_rows(api: Sift, uuid: str) -> list[dict]:
+    h = api.call(f"/api/internal/drip-campaign-history/by-property/?property_uuid={uuid}")
+    return (h.get("results") if isinstance(h, dict) else h) or []
+
+
+def drip_line(h: dict) -> str | None:
+    """'SMS Line C' for a P1 morning-text drip history, None for any other drip."""
+    src = (((h.get("details") or {}).get("event_extra_info") or {}).get("source") or {}).get("title") or ""
+    m = _DRIP_LINE_RE.search(src)
+    return "SMS " + m.group(1) if m else None
+
+
+def drip_histories(api: Sift) -> list[dict]:
+    """Every P1 morning-text drip history in the account (the list endpoint ignores its drip filter)."""
+    out, off = [], 0
+    while True:
+        r = api.call(f"/api/internal/drip-campaign-history/?limit=100&offset={off}")
+        rows = r.get("results") or []
+        out.extend(h for h in rows if drip_line(h))
+        off += 100
+        if not r.get("next") or not rows or off > 20000:
+            return out
+
+
+def classify_drip(h: dict, now: dt.datetime) -> dict:
+    """Where a P1 drip stands at `now` (Central):
+    completed      all 5 texts went out (or DataSift closed it)
+    delayed        its next text is due today, possibly overdue or late in the evening: keep it
+    weekend-bound  its next text would go out on a Saturday or Sunday: the only removal candidate
+    later-weekday  its next text is due on a later weekday: keep it
+    failed/...     DataSift stopped it (e.g. no primary phone): nothing more will send, flagged
+    needs_review is set when later texts would land on a weekend or the state can't be read."""
+    d = h.get("details") or {}
+    sent = sum(1 for x in d.get("log") or [] if x.get("action") == "send_sms" and x.get("status") == "ok")
+    out = {"history_uuid": h.get("uuid"), "line": drip_line(h), "sent": sent, "status": h.get("status"),
+           "next": None, "after_hours": False, "needs_review": False}
+    if h.get("status") == "completed" or sent >= DRIP_SENDS:
+        return {**out, "state": "completed"}
+    if h.get("status") != "running":
+        return {**out, "state": h.get("status") or "unknown", "needs_review": True}
+    nxt = to_ct(d.get("next_run_at") or "")
+    if nxt is None:
+        return {**out, "state": "unknown", "needs_review": True}
+    out["next"] = nxt.strftime("%a %Y-%m-%d %H:%M")
+    rest_on_weekend = any((nxt + dt.timedelta(days=i)).weekday() >= 5 for i in range(DRIP_SENDS - sent))
+    if nxt.date() <= now.date():
+        return {**out, "state": "delayed", "after_hours": nxt.hour >= 19, "needs_review": rest_on_weekend}
+    if nxt.weekday() >= 5:
+        return {**out, "state": "weekend-bound"}
+    return {**out, "state": "later-weekday", "needs_review": rest_on_weekend}
+
+
 def send_sms(token: str, line: str, to: str, message: str) -> tuple[bool, str]:
     body = urllib.parse.urlencode({"from": line, "to": to, "message": message}).encode()
     req = urllib.request.Request(SMS_API, data=body, method="POST",
@@ -389,6 +568,7 @@ def run_pm_texts(args) -> int:
     models = load_day(api, day, CALLER_EMAIL)
     prior_counts = Counter(s.get("line") for s in sent_log if s.get("ok") and s.get("line"))
     to_send, skipped = plan_pm_texts(models, day, CALLER_EMAIL, already, prior_counts)
+    to_send = drop_drip_primaries(api, to_send, skipped, models)
     lines = [f"Afternoon texts for {day} ({'LIVE' if live else 'DRY RUN'}): {sum(1 for e in to_send if not e['overflow'])} to send, "
              f"{sum(1 for e in to_send if e['overflow'])} over line cap, {len(skipped)} skipped"]
     for e in to_send:
@@ -524,11 +704,17 @@ def build_audit(models: list[dict], day: str, caller: str, legacy: dict | None =
     if not dials:
         out.append("No outbound calls logged for this caller today.")
         return "\n".join(out)
-    by_line = Counter(c["from"] for _, c in dials)
-    by_hour = Counter(c["ct"].hour for _, c in dials)
-    first, last = min(c["ct"] for _, c in dials), max(c["ct"] for _, c in dials)
-    out.append(f"Dials {len(dials)} (floor {DIAL_FLOOR}) on {len({m['uuid'] for m, _ in dials})} records, {first:%H:%M} to {last:%H:%M}. "
-               f"Answered {sum(1 for _, c in dials if c['result'] == 'answered')}, no answer {sum(1 for _, c in dials if c['result'] == 'noanswer')}.")
+    # One smrtPhone call to a number shared by several owners is logged on each record, so the
+    # header counts each call once (same key as kpi_scorecard._call_key); the per-record checks
+    # below still look at every record the call was logged on.
+    uniq = list({(c.get("id") or (c["from"], c["to"], c["ct"])): c for _, c in dials}.values())
+    by_line = Counter(c["from"] for c in uniq)
+    by_hour = Counter(c["ct"].hour for c in uniq)
+    first, last = min(c["ct"] for c in uniq), max(c["ct"] for c in uniq)
+    dup = len(dials) - len(uniq)
+    out.append(f"Dials {len(uniq)} (floor {DIAL_FLOOR}) on {len({m['uuid'] for m, _ in dials})} records, {first:%H:%M} to {last:%H:%M}. "
+               f"Answered {sum(1 for c in uniq if c['result'] == 'answered')}, no answer {sum(1 for c in uniq if c['result'] == 'noanswer')}."
+               + (f" ({dup} more log rows are the same calls on other records.)" if dup else ""))
     line_txt = ", ".join(f"...{l[-4:]}={n}{' OVER CAP' if n > MAX_PER_LINE else ''}" for l, n in by_line.most_common())
     unused = [l[-4:] for l in CALL_LINES if l not in by_line]
     s0, s1 = int(SHIFT[0][:2]), int(SHIFT[1][:2])
@@ -631,35 +817,94 @@ def _in_window(spec: str) -> bool:
 
 
 def run_audit(args) -> int:
+    """7:15 PM caller audit. Writes audit_posted_<day>.json (read by the next-morning
+    audit-check) and exits 1 when the report could not be posted, so the workflow alert fires."""
     if args.only_between and not _in_window(args.only_between):
         print(f"Outside window {args.only_between} Central (now {ct_now():%H:%M}); skipping.")
+        # Only the dispatcher's run is meant to land inside the window; the off-season GitHub
+        # fallback cron is outside it every day, so that one skips quietly.
+        if getattr(args, "alert_skip", False) and args.slack:
+            _slack(f":warning: End-of-day audit did not run: dispatched at {ct_now():%H:%M} Central, "
+                   f"outside its window {args.only_between}. Re-run it from Actions (mode audit).")
         return 0
     api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
     day = args.day or ct_now().date().isoformat()
+    stats = {"selected": 0, "skipped": 0, "errors": 0}
     try:
         legacy = load_legacy_presets(api, day)
     except RuntimeError as e:
         print(f"(legacy presets skipped: {e})")
+        stats["errors"] += 1
         legacy = None
-    models = load_day(api, day, CALLER_EMAIL)
+    models = load_day(api, day, CALLER_EMAIL, stats)
     report = build_audit(models, day, CALLER_EMAIL, legacy)
     try:
         import kpi_scorecard
-        report += "\n" + kpi_scorecard.daily_lines(models, CALLER_EMAIL)
+        report += "\n" + kpi_scorecard.daily_lines(models, CALLER_EMAIL, day=dt.date.fromisoformat(day), stats=stats)
     except Exception as e:
         report += f"\n(KPI scorecard failed: {e})"
     print(report)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     (STATE_DIR / f"audit_{day}.md").write_text(report, encoding="utf-8")
+    posted = _slack(report) if args.slack else False
+    (STATE_DIR / f"audit_posted_{day}.json").write_text(json.dumps(
+        {"day": day, "posted": posted, "at": ct_now().isoformat(timespec="minutes"), "stats": stats}), encoding="utf-8")
+    return 1 if args.slack and not posted else 0
+
+
+def prev_business_day(d: dt.date) -> dt.date:
+    d -= dt.timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= dt.timedelta(days=1)
+    return d
+
+
+def audit_marker_problem(folder: Path, day: str) -> str | None:
+    """None when some audit_posted_<day>.json under `folder` says the report was posted."""
+    hits = sorted(folder.rglob(f"audit_posted_{day}.json")) if folder.exists() else []
+    if not hits:
+        return "no audit run left a marker (it did not run, skipped its window, failed or timed out)"
+    for h in hits:
+        try:
+            if json.loads(h.read_text(encoding="utf-8")).get("posted") is True:
+                return None
+        except ValueError:
+            continue
+    return "the audit ran but its report was not posted to Slack"
+
+
+def run_audit_check(args) -> int:
+    """Next-morning check that the previous business day's audit ran and posted its report.
+    A skipped or green-but-empty run does not count. `--markers` is a folder of downloaded
+    audit artifacts."""
+    day = args.day or prev_business_day(ct_now().date()).isoformat()
+    problem = audit_marker_problem(Path(args.markers), day)
+    if not problem:
+        print(f"Audit for {day} completed and posted.")
+        return 0
+    text = f":warning: End-of-day audit for {day} is missing: {problem}. Re-run it from Actions (mode audit, day {day})."
+    print(text)
     if args.slack:
-        _slack(report)
-    return 0
+        _slack(text)
+    return 1
 
 
 # ----------------------------------------------------------------- am start
 PRESET_01_TITLE = "01. New - Set to Prospecting"
 SMS_LINE_TAGS = ("SMS Line A", "SMS Line B", "SMS Line C", "SMS Line D", "SMS Line E")
-MAX_NEW_PER_LINE = 20
+# Temporary reduced cohort (approved 2026-10-27): at most 9 new records per line per Monday.
+# 9 is a ceiling, not a target: line_capacity() lowers it for texts the line already sent today,
+# drips still running on it, and the chance that DataSift sends a new record's opener twice.
+MAX_NEW_PER_LINE = 9
+CAP_MARGIN = 2
+
+
+def line_capacity(started_today: int, sent_today: int, running_drips: int) -> int:
+    """New records a line can still take today without risking MAX_PER_LINE texts.
+    Each running drip may send today's text plus a duplicate (2), each new record its opener plus
+    a duplicate (2), and CAP_MARGIN texts stay free for a manual reply."""
+    room = (MAX_PER_LINE - sent_today - 2 * running_drips - CAP_MARGIN) // 2
+    return max(0, min(MAX_NEW_PER_LINE - started_today, room))
 
 
 def _preset_must(api: Sift, title_prefix: str) -> dict:
@@ -679,63 +924,162 @@ def _best_primary(phones: dict) -> str | None:
     return None
 
 
-def plan_am_start(api: Sift, prior_line_counts: Counter | None = None) -> tuple[list[dict], list[dict]]:
-    """Records preset 01 would show right now, split into (ready, blocked) with the reason for each block.
-    prior_line_counts = records already started per line earlier today, so the daily cap holds across runs."""
-    must = _preset_must(api, PRESET_01_TITLE)
-    rows = api.search(must)
-    ready, blocked, per_line = [], [], Counter(prior_line_counts or {})
-    for row in rows:
-        u = row["uuid"]
-        det = api.call(f"/api/internal/property/{u}/")
+def _primary_num(owner: dict) -> str:
+    primary = owner.get("primary_phone")
+    return re.sub(r"\D", "", str(primary.get("number") if isinstance(primary, dict) else primary or ""))[-10:]
+
+
+def load_capacity(api: Sift, started_today: Counter) -> dict[str, dict]:
+    """{line tag: {sent, running, started, capacity}} from today's sends and running P1 drips.
+    Raises RuntimeError when either can't be read; the caller must then start nothing."""
+    now = ct_now()
+    sent, _ = count_sent_by_line(api, now.date(), now)
+    running = Counter(drip_line(h) for h in drip_histories(api) if h.get("status") == "running")
+    out = {}
+    for tag in SMS_LINE_TAGS:
+        k = {"sent": sent[SMS_LINE_NUMBERS[tag]], "running": running[tag], "started": started_today[tag]}
+        out[tag] = {**k, "capacity": line_capacity(k["started"], k["sent"], k["running"])}
+    return out
+
+
+def am_start_gate(det: dict, stop: dict, drips: list[dict] | None, batch_tag: str | None) -> str | None:
+    """Why a record must NOT be set to Prospecting, or None when it is a clean, ready Batch record."""
+    owner = det.get("owner") or {}
+    phones = {ph["number"]: ph for ph in (owner.get("phones") or [])}
+    lines = [t for t in (det.get("tags") or []) if t in SMS_LINE_TAGS]
+    primary = _primary_num(owner)
+    if det.get("status"):
+        return f"record already has status {det.get('status')!r} (only clean records start)"
+    if batch_tag and batch_tag not in (det.get("tags") or []):
+        return f"missing tag {batch_tag!r}"
+    if det.get("assigned_to") != CALLER_USER_UUID:
+        return "not assigned to the caller"
+    if not (owner.get("first_name") or "").strip():
+        return "owner has no first name (text would read 'Hey ,')"
+    if len(lines) != 1:
+        return f"needs exactly one SMS Line tag (has {len(lines)})"
+    if not primary or primary not in phones:
+        best = _best_primary(phones)
+        return "no primary phone" + (f" (best candidate ...{best[-4:]})" if best else " and no Dial First/Second mobile")
+    if phones[primary].get("type") != "MOBILE" or phones[primary].get("status") in BAD_MARKS:
+        return f"primary phone is {phones[primary].get('type')}/{phones[primary].get('status')}"
+    if stop["hold"]:
+        return f"STOP policy hold ({stop['why']})"
+    if primary in stop["blocked"]:
+        return "primary phone is DNC"
+    if drips is None:
+        return "drip history unreadable"
+    if drips:
+        return f"already has drip history ({', '.join(sorted({str(x.get('status')) for x in drips}))})"
+    return None
+
+
+def load_ready_file(path: str | None, day: str) -> tuple[dict | None, str | None]:
+    """(marker, problem) for the Friday readiness marker written by weekly_topup.py validate."""
+    if not path:
+        return None, "no readiness marker given"
+    f = Path(path)
+    if not f.exists():
+        return None, f"readiness marker {f.name} not found (Friday prep did not finish)"
+    try:
+        mk = json.loads(f.read_text(encoding="utf-8"))
+    except ValueError as e:
+        return None, f"readiness marker unreadable: {e}"
+    if mk.get("batch_date") != day:
+        return mk, f"readiness marker is for {mk.get('batch_date')}, not {day}"
+    if not mk.get("ok"):
+        return mk, f"readiness marker says NOT ready: {mk.get('problem') or 'see Friday report'}"
+    if not mk.get("uuids"):
+        return mk, "readiness marker lists no records"
+    return mk, None
+
+
+def plan_am_start(api: Sift, candidates: list[str], batch_tag: str | None, capacity: dict[str, dict],
+                  marker_lines: dict | None = None) -> tuple[list[dict], list[dict], list[str]]:
+    """Split candidate records into (ready, held, errors). Records are taken in candidate order
+    until each line's capacity is used up; anything unreadable is held, never started."""
+    ready, held, errors = [], [], []
+    left = {k: v["capacity"] for k, v in capacity.items()}
+    for u in candidates:
+        try:
+            det = api.call(f"/api/internal/property/{u}/")
+        except RuntimeError as ex:
+            errors.append(f"{u}: {str(ex)[:120]}")
+            held.append({"uuid": u, "street": "?", "owner_first": "", "line": None, "primary": "", "why": "record unreadable"})
+            continue
         owner = det.get("owner") or {}
-        phones = {ph["number"]: ph for ph in (owner.get("phones") or [])}
         lines = [t for t in (det.get("tags") or []) if t in SMS_LINE_TAGS]
-        first = (owner.get("first_name") or "").strip()
-        primary = owner.get("primary_phone")
-        primary_num = str(primary.get("number") if isinstance(primary, dict) else primary or "")
-        primary_num = re.sub(r"\D", "", primary_num)[-10:]
-        e = {"uuid": u, "street": (det.get("address") or {}).get("street") or "", "owner_first": first, "line": lines[0] if len(lines) == 1 else None,
-             "primary": primary_num, "status": det.get("status"), "assigned": det.get("assigned_to")}
-        why = None
-        if det.get("status") == "prospecting":
-            why = "already prospecting"
-        elif not first:
-            why = "owner has no first name (text would read 'Hey ,')"
-        elif len(lines) != 1:
-            why = f"needs exactly one SMS Line tag (has {len(lines)})"
-        elif not primary_num or primary_num not in phones:
-            why = "no primary phone" + (f" (best candidate ...{_best_primary(phones)[-4:]})" if _best_primary(phones) else " and no Dial First/Second mobile")
-        elif phones[primary_num].get("type") != "MOBILE" or phones[primary_num].get("status") in BAD_MARKS:
-            why = f"primary phone is {phones[primary_num].get('type')}/{phones[primary_num].get('status')}"
-        elif det.get("assigned_to") != CALLER_USER_UUID:
-            why = "not assigned to the caller"
-        elif per_line[lines[0]] >= MAX_NEW_PER_LINE:
-            why = f"{lines[0]} already has {MAX_NEW_PER_LINE} new records today"
+        e = {"uuid": u, "street": (det.get("address") or {}).get("street") or "", "owner_first": (owner.get("first_name") or "").strip(),
+             "line": lines[0] if len(lines) == 1 else None, "primary": _primary_num(owner),
+             "status": det.get("status"), "assigned": det.get("assigned_to")}
+        stop = record_stop(api, u, det)
+        try:
+            drips = drip_rows(api, u)
+        except RuntimeError as ex:
+            errors.append(f"{e['street']}: drip history {str(ex)[:100]}")
+            drips = None
+        why = am_start_gate(det, stop, drips, batch_tag)
+        if not why and marker_lines and marker_lines.get(u) not in (None, e["line"]):
+            why = f"line changed since Friday ({marker_lines.get(u)} -> {e['line']})"
+        if not why and left.get(e["line"], 0) <= 0:
+            c = capacity.get(e["line"]) or {}
+            why = (f"{e['line']} has no room today (sent {c.get('sent')}, running drips {c.get('running')}, "
+                   f"started {c.get('started')}, ceiling {MAX_NEW_PER_LINE})")
         if why:
-            blocked.append({**e, "why": why})
+            held.append({**e, "why": why})
         else:
-            per_line[lines[0]] += 1
+            left[e["line"]] -= 1
             ready.append(e)
-    return ready, blocked
+    return ready, held, errors
+
+
+def _alert(args, text: str) -> int:
+    print(text)
+    if getattr(args, "slack", False):
+        _slack(text)
+    return 1
 
 
 def run_am_start(args) -> int:
+    """Monday 9:50 AM: set Friday's validated Batch records to Prospecting, which starts the drip.
+    Live mode needs the Friday readiness marker and readable line capacity; otherwise it starts
+    nothing and exits 1 with an alert."""
     live = bool(args.send)
+    now = ct_now()
     if live and not args.force and args.only_between and not _in_window(args.only_between):
-        print(f"Outside window {args.only_between} Central (now {ct_now():%H:%M}); nothing started.")
+        print(f"Outside window {args.only_between} Central (now {now:%H:%M}); nothing started.")
+        return 0
+    day = now.date().isoformat()
+    batch_date = args.batch_date or day
+    if live and now.weekday() != 0:
+        print(f"am-start launches new records on Mondays only (today is {now:%A}); nothing started.")
         return 0
     api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
-    day = ct_now().date().isoformat()
+    marker, problem = load_ready_file(args.ready_file, batch_date)
+    if live and problem:
+        return _alert(args, f":x: Morning start {day}: NOT launched. {problem}. No record was changed.")
     state_file = STATE_DIR / f"am_start_{day}.json"
     prior = json.loads(state_file.read_text(encoding="utf-8")).get("results", []) if state_file.exists() else []
-    ready, blocked = plan_am_start(api, Counter(r.get("line") for r in prior if r.get("ok") and r.get("line")))
-    lines = [f"Morning start for {day} ({'LIVE' if live else 'DRY RUN'}): {len(ready)} to set Prospecting, {len(blocked)} held back"]
-    for e in ready:
-        lines.append(f"  START {e['street']} | {e['owner_first']} | {e['line']} | primary ...{e['primary'][-4:]}")
-    for e in blocked:
-        lines.append(f"  HOLD  {e['street']} | {e['owner_first'] or '(no name)'} | {e['why']}")
-    results = []
+    try:
+        capacity = load_capacity(api, Counter(r.get("line") for r in prior if r.get("ok") and r.get("line")))
+    except RuntimeError as ex:
+        return _alert(args, f":x: Morning start {day}: NOT launched. Line capacity unreadable ({str(ex)[:200]}). No record was changed.")
+    if marker and not problem:
+        candidates, marker_lines = list(marker["uuids"]), marker.get("lines") or {}
+        source = f"readiness marker ({len(candidates)} records)"
+    else:
+        candidates, marker_lines = [r["uuid"] for r in api.search(_preset_must(api, PRESET_01_TITLE))], None
+        source = f"preset 01 ({len(candidates)} records; dry run only: {problem})"
+    ready, held, errors = plan_am_start(api, candidates, f"Batch {batch_date}", capacity, marker_lines)
+    out = [f"Morning start for {day} ({'LIVE' if live else 'DRY RUN'}), Batch {batch_date}, from {source}: "
+           f"{len(ready)} to set Prospecting, {len(held)} held back",
+           "Line room: " + "; ".join(f"{k[4:]} sent {v['sent']}, running {v['running']}, started {v['started']} -> {v['capacity']}"
+                                     for k, v in capacity.items())]
+    out += [f"  START {e['street']} | {e['owner_first']} | {e['line']} | primary ...{e['primary'][-4:]}" for e in ready]
+    out += [f"  HOLD  {e['street']} | {e['owner_first'] or '(no name)'} | {e['why']}" for e in held]
+    if errors:
+        out.append(f":warning: {len(errors)} read errors (those records held): " + "; ".join(errors[:5]))
+    results, rc = [], 1 if errors else 0
     if live and ready:
         for e in ready:
             try:
@@ -748,21 +1092,26 @@ def run_am_start(args) -> int:
         for r in results:
             if not r["ok"]:
                 continue
-            h = api.call(f"/api/internal/drip-campaign-history/by-property/?property_uuid={r['uuid']}")
-            running = [x for x in (h.get("results") or []) if x.get("status") == "running"]
+            try:
+                running = [x for x in drip_rows(api, r["uuid"]) if x.get("status") == "running"]
+            except RuntimeError as ex:
+                no_drip.append(f"{r['street']} (unreadable: {str(ex)[:60]})")
+                continue
             r["running_drips"] = len(running)
             if len(running) != 1:
                 no_drip.append(f"{r['street']} ({len(running)} running)")
         fails = [r for r in results if not r["ok"]]
-        lines.append(f"Set Prospecting on {len(results) - len(fails)}; failed {len(fails)}" + "".join(f"\n  FAILED {r['street']}: {r['err']}" for r in fails))
-        lines.append(":white_check_mark: every started record has exactly one running drip" if not no_drip else ":warning: drip check: " + "; ".join(no_drip))
-    report = "\n".join(lines)
+        out.append(f"Set Prospecting on {len(results) - len(fails)}; failed {len(fails)}" + "".join(f"\n  FAILED {r['street']}: {r['err']}" for r in fails))
+        out.append(":white_check_mark: every started record has exactly one running drip" if not no_drip else ":warning: drip check: " + "; ".join(no_drip))
+        rc = 1 if (fails or no_drip or errors) else 0
+    report = "\n".join(out)
     print(report)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps({"ready": ready, "blocked": blocked, "results": prior + results}, indent=1, default=str), encoding="utf-8")
+    state_file.write_text(json.dumps({"ready": ready, "blocked": held, "capacity": capacity, "results": prior + results},
+                                     indent=1, default=str), encoding="utf-8")
     if args.slack:
         _slack(report)
-    return 0
+    return rc
 
 
 # ----------------------------------------------------------- extra numbers
@@ -856,8 +1205,8 @@ def plan_extra_texts(api: Sift, prior_line_counts: Counter | None = None, ledger
             why = "owner has no first name"
         elif len(lines) != 1:
             why = f"needs exactly one SMS Line tag (has {len(lines)})"
-        elif owner.get("dnc") or owner.get("opt_out"):
-            why = "owner DNC/opt-out"
+        elif (stop := stop_policy(owner, _all_phones(det), dnc_origins(evs)))["hold"]:
+            why = f"STOP policy hold ({stop['why']})"
         elif any((ph.get("status") or "").upper() in ("CORRECT", "CORRECT_DNC") for ph in owner.get("phones") or []):
             why = "owner's number already confirmed Correct"
         if why:
@@ -932,12 +1281,12 @@ def run_extra_texts(args) -> int:
     return 0
 
 
-def _slack(text: str, chunk: int = 3500) -> None:
+def _slack(text: str, chunk: int = 3500) -> bool:
     """Post to the webhook, splitting long reports into several messages at line boundaries."""
     url = _env("SLACK_WEBHOOK_URL")
     if not url:
         print("(no SLACK_WEBHOOK_URL; not posted)")
-        return
+        return False
     parts, cur = [], ""
     for line in text.splitlines():
         if cur and len(cur) + len(line) + 1 > chunk:
@@ -953,9 +1302,10 @@ def _slack(text: str, chunk: int = 3500) -> None:
             urllib.request.urlopen(req, timeout=20).read()
         except Exception as e:  # noqa: BLE001
             print(f"(Slack post failed: {e})")
-            return
+            return False
         time.sleep(1)
     print(f"(posted to Slack in {len(parts)} message(s))")
+    return True
 
 
 # ----------------------------------------------------------------- line watch
@@ -1181,12 +1531,20 @@ def main() -> int:
     a.add_argument("--day")
     a.add_argument("--slack", action="store_true")
     a.add_argument("--only-between", help="Central window like 19:00-20:00; outside it the run does nothing")
+    a.add_argument("--alert-skip", action="store_true", help="post a Slack warning when --only-between skips the run")
     a.set_defaults(fn=run_audit)
+    ac = sub.add_parser("audit-check", help="alert when the previous business day's audit did not run and post")
+    ac.add_argument("--day", help="audit day to check (default: previous business day)")
+    ac.add_argument("--markers", default=str(STATE_DIR / "audit_markers"), help="folder of downloaded audit artifacts")
+    ac.add_argument("--slack", action="store_true")
+    ac.set_defaults(fn=run_audit_check)
     m = sub.add_parser("am-start", help="set preset-01 records to Prospecting (starts the morning drip)")
     m.add_argument("--send", action="store_true", help="actually change statuses (default is dry run)")
     m.add_argument("--force", action="store_true")
     m.add_argument("--slack", action="store_true")
     m.add_argument("--only-between", help="Central window like 09:50-12:00")
+    m.add_argument("--ready-file", help="Friday readiness marker (topup_ready_<batch>.json); required for --send")
+    m.add_argument("--batch-date", help="YYYY-MM-DD of the Batch tag (default today)")
     m.set_defaults(fn=run_am_start)
     x = sub.add_parser("extra-texts", help="one confirmation text to each extra mobile number on prospecting records")
     x.add_argument("--send", action="store_true", help="actually send (default is dry run)")
