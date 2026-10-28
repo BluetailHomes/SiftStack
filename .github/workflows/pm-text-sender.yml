@@ -13,6 +13,10 @@ name: PM Text Sender + Caller Audit
 #             switch: repo variable EXTRA_TEXTS_LIVE = "true".
 #   audit     7:15 PM Central, Mon-Fri. Posts the end-of-day caller checklist
 #             (unmarked numbers, line caps, missed callbacks, legacy tagging) to Slack.
+#             Alerts Slack if it fails, times out, or a dispatched run lands outside
+#             its window; leaves audit_posted_<day>.json in its artifact.
+#   audit-check  runs with the dispatcher's am-start (9:50 AM weekdays): alerts Slack
+#             unless the previous business day's audit artifact says it posted.
 #
 # HOW THESE GET TRIGGERED (changed 2026-10-20): GitHub's own `schedule:` crons
 # ran ~4 hours late on the first live day and pm-texts missed its window
@@ -181,7 +185,7 @@ jobs:
       github.event.schedule == '15 0 * * 2-6' || github.event.schedule == '15 1 * * 2-6'
       || (github.event_name == 'workflow_dispatch' && inputs.mode == 'audit')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -196,10 +200,47 @@ jobs:
           ARGS="audit --slack"
           if [ -n "$DAY" ]; then ARGS="$ARGS --day $DAY"; fi
           if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 19:00-20:00"; fi
+          if [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --alert-skip"; fi
           python src/pm_text_sender.py $ARGS
+      - name: Alert on audit failure or timeout
+        if: failure() || cancelled()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          python -c "import sys; sys.path.insert(0, 'src'); import pm_text_sender as p; p._slack(':x: End-of-day audit FAILED or timed out (${{ job.status }}). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}')"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: audit-${{ github.run_id }}
           path: output/pm_texts/
           if-no-files-found: ignore
+
+  audit-check:
+    # Independent of the audit job: did the previous business day's audit run AND post?
+    # A skipped or green-but-empty run leaves no posted marker, so it alerts.
+    # Only the dispatcher's am-start run (gate=true) checks, so one missing audit is one alert;
+    # the two GitHub fallback crons and manual am-start runs skip it.
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'am-start' && inputs.gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download recent audit artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p output/pm_texts/audit_markers
+          for RUN in $(gh run list --repo "$GITHUB_REPOSITORY" --workflow pm-text-sender.yml --limit 40 --json databaseId -q '.[].databaseId' || true); do
+            gh run download "$RUN" --repo "$GITHUB_REPOSITORY" -n "audit-$RUN" -D "output/pm_texts/audit_markers/$RUN" 2>/dev/null || true
+          done
+          find output/pm_texts/audit_markers -name 'audit_posted_*' || true
+      - name: Check previous business day's audit
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python src/pm_text_sender.py audit-check --slack
