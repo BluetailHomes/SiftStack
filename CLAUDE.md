@@ -114,5 +114,6 @@ Moved verbatim from this file on 2026-10-27. Read the relevant one before changi
 | `apify-and-stage2.md` | Actor input, multi-platform Tasks, parcel lookup tiers (NM/Clay/Cass/Johnson/Platte), volume anomaly alerts, known gaps, stage-2 DataSift upload |
 | `high-potential-filter.md` | Step 8b ZIP + equity gates, thresholds, suppressed-leads log, tags, opt-out flags |
 | `courthouse-photo-pipeline.md` | Photo/Dropbox import, OCR patterns, Knox probate deep prospecting |
+| `wholesale-offer.md` | Wholesale offer layer on Ty's analyzer: case.json, draft packet, risk-acknowledged approval, final PDF, live-use blockers |
 | `skill-library.md` | DataSift's 27-skill plugin library, `bluetail-*` skills, historical notes |
 | `../OK_KS_SCRAPER_FEASIBILITY.md`, `../sms_reply_rules.md` | Pre-existing docs |
