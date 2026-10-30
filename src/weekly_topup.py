@@ -14,6 +14,7 @@ Modes
   python src/weekly_topup.py apply                   # same plan, still writes nothing without --live
   python src/weekly_topup.py apply --live --only-between 18:00-20:00 --slack
   python src/weekly_topup.py validate --slack        # Friday: re-read the batch, write the readiness marker
+  python src/weekly_topup.py apply --uuids-file batch.csv --batch-date 2026-11-02   # exactly a reviewed batch
 
 Env: REISIFT_API_KEY; SLACK_WEBHOOK_URL / GOOGLE_CHAT_WEBHOOK_URL for --slack.
 
@@ -25,7 +26,14 @@ Safety rules
     plan can't look like a batch still waiting to be written.
   - Every write is logged to output/account_backups/topup_write_{date}.json, even on a crash.
   - Status is never set here; am-start owns the status flip (it starts the drip).
-  - `validate` re-reads every written record and writes output/pm_texts/topup_ready_{date}.json.
+  - Suppression is owner-level: a decline, an active lead, a do-not-contact tag or a DNC/opt-out
+    on ANY of the owner's properties (matched by owner, name + mailing address, or any phone) keeps
+    every one of their properties out. So do Entity Owner / Entity Classification Hold, known equity
+    under 30% (unknown equity is kept), and a sale in the last 365 days.
+  - `--uuids-file` (a CSV with property_uuid and line columns, in order) pins the batch to exactly
+    those records. Each is re-checked; one that fails drops out and nothing is added in its place.
+  - `validate` re-reads every record carrying that Monday's Batch tag (not the runner's plan file, so
+    a Sunday dry run can't swap in a different batch) and writes output/pm_texts/topup_ready_{date}.json.
     Monday's am-start launches only the records listed there, and nothing when the file is
     missing or not ok, so any failed Friday step means no Monday launch.
 """
@@ -33,16 +41,19 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 import datetime as dt
 import json
 import os
+import re
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pm_text_sender import (  # noqa: E402
-    CALLER_EMAIL, CALLER_USER_UUID, POST_SEQ_HOLD_TAG, PRESET_01_TITLE, STATE_DIR, STOP_REVIEW_TAG, Sift, _best_primary,
-    _env, _google_chat, _in_window, _slack, ct_now, drip_rows, enroll_block, load_day, record_stop, review_tags_problem,
+    CALLER_EMAIL, CALLER_USER_UUID, POST_SEQ_HOLD_TAG, PRESET_01_TITLE, STATE_DIR, STOP_REVIEW_TAG, Sift, _all_phones,
+    _best_primary, _env, _google_chat, _in_window, _slack, _tag_key, ct_now, drip_rows, enroll_block, load_day,
+    record_stop, review_tags_problem,
 )
 
 PRESET_01_UUID = "4881671f-526c-440f-add2-97564c89d069"
@@ -64,6 +75,14 @@ LINE_CAP = 9                         # new records per SMS line per Monday; am-s
 MAIL_ONLY_TAG = "Mail Only"
 TAG_CHUNK = 50
 BACKUP_DIR = STATE_DIR.parent / "account_backups"
+MIN_EQUITY = 30.0                    # known equity below this is suppressed; unknown equity is kept
+RECENT_SOLD_DAYS = 365               # a sale this recent means the owner on file may be stale
+SUPPRESS_TAGS = ("Do Not Market", "ZZ STOP GO", "Entity Owner", "Entity Classification Hold", "Sold", "Negative Equity")
+# Statuses on ANY of the owner's properties that keep the owner out of a new batch.
+DECLINE_STATUSES = ("not_interested", "Dead Lead", "lost_deal")
+ACTIVE_STATUSES = ("new_lead", "No Contact New Lead", "Cold Lead", "Warm Lead", "Hot Lead", "Ghosting Lead",
+                   "prospecting", "under_contract", "closed", "Deep Prospecting")
+OWNER_BLOCK_TAGS = ("Do Not Market", "ZZ STOP GO", STOP_REVIEW_TAG[1], POST_SEQ_HOLD_TAG[1])
 
 
 def _rows(resp):
@@ -78,6 +97,98 @@ def next_monday(today: dt.date) -> dt.date:
 
 def line_plan(n: int) -> list[str]:
     return [LINES[i % len(LINES)] for i in range(n)]
+
+
+def _d10(n) -> str:
+    return re.sub(r"\D", "", str(n or ""))[-10:]
+
+
+def _norm(s) -> str:
+    return re.sub(r"[^a-z0-9 ]", "", re.sub(r"\s+", " ", str(s or "").lower())).strip()
+
+
+def owner_key(o: dict) -> str | None:
+    """Name + mailing street + ZIP, to match one owner filed under different owner uuids."""
+    a = (o or {}).get("address") or {}
+    nm = _norm(f"{o.get('first_name') or ''} {o.get('last_name') or ''} {o.get('company') or ''}")
+    st = _norm(a.get("street"))
+    return f"{nm}|{st}|{str(a.get('zip5') or a.get('postal_code') or '')[:5]}" if nm and st else None
+
+
+def suppress_reason(d: dict, today: dt.date | None = None) -> str | None:
+    """Why this record must never be enrolled (whatever its assignment), or None.
+    Unknown equity and an unknown sale date are kept, never dropped."""
+    o = d.get("owner") or {}
+    keys = {_tag_key(t) for t in d.get("tags") or []}
+    for t in SUPPRESS_TAGS:
+        if _tag_key(t) in keys:
+            return f"tagged {t!r}"
+    if o.get("deceased"):
+        return "owner flagged deceased"
+    if any(so.get("dnc") or so.get("opt_out") for so in d.get("secondary_owners") or []):
+        return "secondary owner dnc/opt_out"
+    for n, ph in _all_phones(d).items():
+        if any("litig" in str(t).lower() for t in ph.get("tags") or []):
+            return f"litigator tag on ...{_d10(n)[-4:]}"
+    try:
+        eq = float(d["equity_percent"]) if d.get("equity_percent") not in (None, "") else None
+    except (TypeError, ValueError):
+        eq = None
+    if eq is not None and eq < MIN_EQUITY:
+        return f"equity {eq:.1f}% < {MIN_EQUITY:.0f}%"
+    try:
+        sold = dt.date.fromisoformat(str(d.get("last_sold"))[:10]) if d.get("last_sold") else None
+    except ValueError:
+        sold = None
+    if sold and ((today or ct_now().date()) - sold).days <= RECENT_SOLD_DAYS:
+        return f"sold {sold} (within {RECENT_SOLD_DAYS} days)"
+    return None
+
+
+class OwnerIndex:
+    """Who must not get a new batch because of ANOTHER property: built from every record in the
+    account with a decline or active status, an owner block tag, or an owner DNC/opt-out flag, keyed
+    by owner uuid (secondary owners too), name + mailing address, and every phone on the record."""
+
+    def __init__(self, api: Sift):
+        self.by_owner, self.by_key, self.by_phone = defaultdict(set), defaultdict(set), defaultdict(set)
+        self.unreadable = 0
+        tag_by_key = {_tag_key(t): u for t, u in tag_uuids(api).items() if t}
+        labels: dict[str, set] = defaultdict(set)
+        searches = [(f"declined ({s})", {"any_property_status": [s]}) for s in DECLINE_STATUSES]
+        searches += [(f"active ({s})", {"any_property_status": [s]}) for s in ACTIVE_STATUSES]
+        searches += [(f"tagged {t!r}", {"any_tags": [tag_by_key[_tag_key(t)]]}) for t in OWNER_BLOCK_TAGS
+                     if _tag_key(t) in tag_by_key]
+        searches += [(f"owner {k}", {k: 1}) for k in ("dnc", "opt_out")]
+        for label, must in searches:
+            for r in api.search(must):
+                labels[r["uuid"]].add(label)
+        # Search rows carry one phone; the detail has all of them and the secondary owners.
+        for u, labs in labels.items():
+            try:
+                d = api.call(f"/api/internal/property/{u}/")
+            except RuntimeError:
+                self.unreadable += 1
+                continue
+            o = d.get("owner") or {}
+            for ow in [o] + list(d.get("secondary_owners") or []):
+                if ow.get("uuid"):
+                    self.by_owner[ow["uuid"]] |= {(l, u) for l in labs}
+            if k := owner_key(o):
+                self.by_key[k] |= {(l, u) for l in labs}
+            for n in _all_phones(d):
+                self.by_phone[_d10(n)] |= {(l, u) for l in labs}
+
+    def block(self, uuid: str, d: dict) -> str | None:
+        """Why this owner is held because of another property, or None."""
+        o = d.get("owner") or {}
+        hits = set(self.by_owner.get(o.get("uuid"), ())) if o.get("uuid") else set()
+        if k := owner_key(o):
+            hits |= self.by_key.get(k, set())
+        for n in _all_phones(d):
+            hits |= self.by_phone.get(_d10(n), set())
+        hits = sorted({l for l, pu in hits if pu != uuid})
+        return f"owner-level: {', '.join(hits)} on another property" if hits else None
 
 
 def skip_reason(d: dict) -> str | None:
@@ -100,7 +211,9 @@ def skip_reason(d: dict) -> str | None:
         return "no first name"
     if o.get("dnc") or o.get("opt_out"):
         return "dnc/opt_out"
-    return None
+    if (d.get("sms_attempts") or 0) or (d.get("predictivecall_attempts") or 0):
+        return "prior text/dialer attempts"
+    return suppress_reason(d)
 
 
 def load_presets(api: Sift) -> tuple[dict, dict]:
@@ -115,7 +228,19 @@ def load_presets(api: Sift) -> tuple[dict, dict]:
     return p01, p02[0]
 
 
-def plan(api: Sift, target: int) -> dict:
+def load_pinned(path: str) -> dict:
+    """{property_uuid: line} in file order, from a reviewed batch CSV (property_uuid, line columns)."""
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    pinned = {r["property_uuid"].strip(): r["line"].strip().upper() for r in rows if (r.get("property_uuid") or "").strip()}
+    if len(pinned) != len(rows) or any(ln not in LINES for ln in pinned.values()):
+        sys.exit(f"{path}: every row needs a unique property_uuid and a line in {LINES}")
+    return pinned
+
+
+def plan(api: Sift, target: int, pinned: dict | None = None, idx: OwnerIndex | None = None) -> dict:
+    """With `pinned` ({uuid: line}), take exactly those records on those lines, in that order: each
+    still goes through every check, and one that fails or isn't in a P1 rung just drops out."""
     p01, p02 = load_presets(api)
     lists = {(l.get("title") or l.get("name") or ""): l for l in _rows(api.call("/api/internal/list/?limit=999"))}
     used_uuids = set(p01["filters"]["must"].get("any_lists") or [])
@@ -146,9 +271,12 @@ def plan(api: Sift, target: int) -> dict:
     never += [u for u, _ in (STOP_REVIEW_TAG, POST_SEQ_HOLD_TAG) if u not in never]
 
     # Work the used rungs first (leftovers), then add new rungs one at a time until the batch fills.
+    idx = idx or OwnerIndex(api)
+    if pinned is not None:
+        target = len(pinned)
     eligible, mail_only, skipped, seen, pool_by_rung, added = [], [], Counter(), set(), {}, []
     for r in used + unused:
-        if len(eligible) >= target:
+        if len(eligible) >= target or (pinned is not None and seen >= set(pinned)):
             break
         must = dict(base, any_lists=[r["uuid"]], any_tags=[p1_uuid])
         # Search rows don't carry assigned_to/status reliably; skip_reason() checks the detail.
@@ -159,11 +287,11 @@ def plan(api: Sift, target: int) -> dict:
             if len(eligible) >= target:
                 break
             u = row["uuid"]
-            if u in seen:
+            if u in seen or (pinned is not None and u not in pinned):
                 continue
             seen.add(u)
             d = api.call(f"/api/internal/property/{u}/")
-            why = skip_reason(d)
+            why = skip_reason(d) or idx.block(u, d)
             if not why:
                 stop = record_stop(api, u, d)
                 if stop["hold"]:
@@ -193,8 +321,19 @@ def plan(api: Sift, target: int) -> dict:
         if not r["used"] and took:
             added.append(r)
 
-    for rec, ln in zip(eligible, line_plan(len(eligible))):
-        rec["line"] = ln
+    if pinned is None:
+        for rec, ln in zip(eligible, line_plan(len(eligible))):
+            rec["line"] = ln
+    else:
+        order = list(pinned)
+        eligible.sort(key=lambda rec: order.index(rec["uuid"]))
+        for rec in eligible:
+            rec["line"] = pinned[rec["uuid"]]
+        if missing_pinned := [u for u in pinned if u not in seen]:
+            skipped["pinned record not in a P1 rung search"] = len(missing_pinned)
+        if mail_only:  # a pinned record that lost its phone is held, not moved to Mail Only
+            skipped["pinned record has no usable phone"] = len(mail_only)
+            mail_only = []
     for rec in eligible:
         cur = rec["current_primary"]
         cur = cur.get("number") if isinstance(cur, dict) else cur
@@ -204,7 +343,8 @@ def plan(api: Sift, target: int) -> dict:
             "rungs_used": [r["name"] for r in used], "rungs_added": [r["name"] for r in added],
             "rungs_added_uuids": [r["uuid"] for r in added],
             "rungs_missing": missing, "pool_by_rung": pool_by_rung, "eligible": eligible,
-            "mail_only": mail_only, "skipped": dict(skipped)}
+            "mail_only": mail_only, "skipped": dict(skipped), "pinned": pinned is not None,
+            "index_unreadable": idx.unreadable}
 
 
 def report(p: dict, batch_date: str, target: int, live: bool = False, batch_exists: bool = False,
@@ -297,6 +437,8 @@ def apply(api: Sift, p: dict, batch_date: str, force: bool = False) -> str:
     per_line = Counter(r["line"] for r in el)
     if max(per_line.values(), default=0) > LINE_CAP:
         raise RuntimeError(f"Line load {dict(per_line)} exceeds {LINE_CAP}/line; add a line or lower --target")
+    if p.get("index_unreadable"):
+        raise RuntimeError(f"{p['index_unreadable']} records behind the owner-level check were unreadable")
     if batch_title in tag_uuids(api) and not force:
         raise RuntimeError(f"Tag '{batch_title}' already exists: this week's batch may already be written "
                            "(rerun with --force only after checking)")
@@ -356,34 +498,62 @@ def apply(api: Sift, p: dict, batch_date: str, force: bool = False) -> str:
     return "\n".join(out)
 
 
-def validate(api: Sift, batch_date: str) -> tuple[dict, str]:
-    """Re-read every record in the saved plan and write the readiness marker am-start needs.
-    A record is ready only if the write landed (assigned, Batch + one line tag, primary set, no
-    status), the STOP policy allows it, its primary is not DNC, it has no drip history, it carries
-    no exclusion tag, and no other batch record shares its primary number or owner.
-    ok=False (Monday launches nothing) when the plan is missing, the exclusion tags can't be
-    confirmed, any record can't be read, or no record is ready. An excluded record just drops out."""
+def validate(api: Sift, batch_date: str, idx: OwnerIndex | None = None) -> tuple[dict, str]:
+    """Re-read every record carrying that Monday's Batch tag and write the readiness marker am-start
+    needs. The tag, not a plan file, defines the batch, so a later dry run can't change it.
+    A record is ready only if the write landed (assigned, Batch + one line tag, primary = its best
+    mobile, no status), the STOP policy allows it, its primary is not DNC, it has no drip history, it
+    passes suppress_reason() and the owner-level check, and no other batch record shares its primary
+    number or owner. ok=False (Monday launches nothing) when the Batch tag is missing, the exclusion
+    tags can't be confirmed, any record can't be read, or no record is ready. An excluded record
+    just drops out."""
     batch_title = f"Batch {batch_date}"
     marker = {"ok": False, "batch_date": batch_date, "checked": ct_now().isoformat(), "uuids": [], "lines": {},
               "excluded": {}, "problem": None}
-    plan_file = STATE_DIR / f"topup_plan_{batch_date}.json"
+    el, details, unread = [], {}, []
     try:
-        el = json.loads(plan_file.read_text(encoding="utf-8"))["eligible"]
-    except (OSError, ValueError, KeyError) as e:
-        el, marker["problem"] = [], f"plan {plan_file.name} unreadable: {e}"
-    unread = []
-    # Fail closed when the exclusion tags can't be confirmed: a renamed tag would match nothing.
-    if not marker["problem"]:
-        marker["problem"] = review_tags_problem(api)
+        batch_uuid = tag_uuids(api).get(batch_title)
+        if not batch_uuid:
+            marker["problem"] = f"tag {batch_title!r} not found (no batch written)"
+        for row in api.search({"any_tags": [batch_uuid]}) if batch_uuid else []:
+            u = row["uuid"]
+            try:
+                d = api.call(f"/api/internal/property/{u}/")
+            except RuntimeError as e:
+                unread.append(u)
+                marker["excluded"][u] = [f"unreadable: {str(e)[:80]}"]
+                continue
+            tags = [t if isinstance(t, str) else t.get("title") for t in (d.get("tags") or [])]
+            lines = [t for t in tags if t and t.startswith("SMS Line ")]
+            o = d.get("owner") or {}
+            el.append({"uuid": u, "line": lines[0][len("SMS Line "):] if len(lines) == 1 else "?",
+                       "owner_uuid": o.get("uuid"),
+                       "best_phone": _best_primary({p["number"]: p for p in (o.get("phones") or [])})})
+            details[u] = d
+        # Fail closed when the exclusion tags can't be confirmed: a renamed tag would match nothing.
+        if not marker["problem"]:
+            marker["problem"] = review_tags_problem(api)
+        idx = idx or OwnerIndex(api)
+    except RuntimeError as e:
+        marker["problem"] = marker["problem"] or f"batch or owner-level search failed: {str(e)[:80]}"
+        idx = None
     numbers, owners = Counter(digits(r.get("best_phone")) for r in el), Counter(r.get("owner_uuid") for r in el)
     for rec in el:
+        d = details[rec["uuid"]]
         try:
-            d = api.call(f"/api/internal/property/{rec['uuid']}/")
             problems = check(api, rec, batch_title, d)
+            if not rec["best_phone"]:
+                problems.append("no usable Dial First/Second mobile")
             if why := enroll_block(d):
                 problems.append(why)
-            if numbers[digits(rec.get("best_phone"))] > 1:
-                problems.append(f"primary ...{digits(rec.get('best_phone'))[-4:]} is on {numbers[digits(rec.get('best_phone'))]} batch records")
+            if (d.get("owner") or {}).get("dnc") or (d.get("owner") or {}).get("opt_out"):
+                problems.append("owner dnc/opt_out")
+            if why := suppress_reason(d):
+                problems.append(why)
+            if idx and (why := idx.block(rec["uuid"], d)):
+                problems.append(why)
+            if rec["best_phone"] and numbers[digits(rec["best_phone"])] > 1:
+                problems.append(f"primary ...{digits(rec['best_phone'])[-4:]} is on {numbers[digits(rec['best_phone'])]} batch records")
             if rec.get("owner_uuid") and owners[rec["owner_uuid"]] > 1:
                 problems.append(f"owner has {owners[rec['owner_uuid']]} batch records")
             stop = record_stop(api, rec["uuid"], d)
@@ -405,6 +575,8 @@ def validate(api: Sift, batch_date: str) -> tuple[dict, str]:
     if not marker["problem"]:
         if unread:
             marker["problem"] = f"{len(unread)} records unreadable"
+        elif idx and idx.unreadable:
+            marker["problem"] = f"{idx.unreadable} records behind the owner-level check unreadable"
         elif max(per_line.values(), default=0) > LINE_CAP:
             marker["problem"] = f"line load {dict(per_line)} exceeds {LINE_CAP}"
         elif not marker["uuids"]:
@@ -444,7 +616,10 @@ def main() -> int:
         s.add_argument("--slack", action="store_true", help="post the report to Slack and Google Chat")
     pa.add_argument("--live", action="store_true", help="actually write to DataSift")
     pa.add_argument("--force", action="store_true", help="write even if this Monday's Batch tag exists")
-    pa.add_argument("--only-between", help="HH:MM-HH:MM Central; do nothing outside it")
+    for s in (pa, pv):
+        s.add_argument("--only-between", help="HH:MM-HH:MM Central; do nothing outside it")
+    for s in (pp, pa):
+        s.add_argument("--uuids-file", help="CSV (property_uuid, line) of a reviewed batch: take exactly those")
     args = ap.parse_args()
 
     if getattr(args, "only_between", None) and not _in_window(args.only_between):
@@ -460,7 +635,7 @@ def main() -> int:
             _slack(text)
             _google_chat(text)
         return 0 if marker["ok"] else 1
-    p = plan(api, args.target)
+    p = plan(api, args.target, pinned=load_pinned(args.uuids_file) if args.uuids_file else None)
     exists = f"Batch {batch_date}" in tag_uuids(api)
     text = report(p, batch_date, args.target, live=live, batch_exists=exists,
                   force=getattr(args, "force", False))

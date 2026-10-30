@@ -41,7 +41,7 @@ def _log(phone, old, new, ts="2026-10-20T15:00:00"):
 class FakeApi:
     """GET-by-path fake of pm_text_sender.Sift. A POST of status starts a drip, like DataSift."""
 
-    TAGS = [{"uuid": u, "title": t} for u, t in (pts.STOP_REVIEW_TAG, pts.POST_SEQ_HOLD_TAG)]
+    TAGS = [{"uuid": u, "title": t} for u, t in (pts.STOP_REVIEW_TAG, pts.POST_SEQ_HOLD_TAG, ("t-batch", BATCH))]
 
     def __init__(self, props, drips=None, logs=None, fail=(), tags=None):
         self.props, self.drips, self.logs, self.fail = props, drips or {}, logs or {}, set(fail)
@@ -66,6 +66,24 @@ class FakeApi:
         if "/logs/" in path:
             return {"results": self.logs.get(u, [])}
         return self.props[u]
+
+    def search(self, must):
+        """Property search over the fakes: by tag uuid, status, owner flag, or rung list."""
+        titles = {t["uuid"]: t["title"] for t in self.tags}
+        out = []
+        for u, d in self.props.items():
+            tags = [t if isinstance(t, str) else t.get("title") for t in d.get("tags") or []]
+            o = d.get("owner") or {}
+            if "any_tags" in must and "any_lists" not in must and not any(titles.get(x) in tags for x in must["any_tags"]):
+                continue
+            if "any_property_status" in must and d.get("status") not in must["any_property_status"]:
+                continue
+            if any(k in must and not o.get(k) for k in ("dnc", "opt_out")):
+                continue
+            if "any_lists" in must and d.get("_list") not in must["any_lists"]:
+                continue
+            out.append({"uuid": u})
+        return out
 
 
 # ------------------------------------------------------------ STOP policy
@@ -260,29 +278,36 @@ def _det_n(n, **kw):
 
 
 def test_validate_ready_and_excluded(tmp_path):
-    nums = {"u1": "8165550011", "u2": "8165550012", "u3": "8165550013"}
-    _plan(tmp_path, ["u1", "u2", "u3"], nums)
-    api = FakeApi({"u1": _det_n(nums["u1"]), "u2": _det_n(nums["u2"], tags=("SMS Line A",)), "u3": _det_n(nums["u3"])},
+    nums = {"u1": "8165550011", "u2": "8165550012", "u3": "8165550013", "x": "8165550014"}
+    api = FakeApi({"u1": _det_n(nums["u1"]), "u2": _det_n(nums["u2"], tags=(BATCH, "Priority 1")), "u3": _det_n(nums["u3"]),
+                   "x": _det_n(nums["x"], tags=("SMS Line A",))},     # no Batch tag: not part of the batch
                   drips={"u3": [{"status": "failed"}]})
     with patch.object(wt, "STATE_DIR", tmp_path):
         mk, text = wt.validate(api, "2026-11-02")
     assert mk["ok"] and mk["uuids"] == ["u1"] and mk["lines"] == {"u1": "SMS Line A"}
-    assert "no batch tag" in mk["excluded"]["u2"] and "has drip history" in mk["excluded"]["u3"]
+    assert "line tags=[]" in mk["excluded"]["u2"] and "has drip history" in mk["excluded"]["u3"]
+    assert "x" not in mk["excluded"]
     assert json.loads((tmp_path / "topup_ready_2026-11-02.json").read_text())["ok"]
     assert text.startswith(":white_check_mark:")
 
 
-def test_validate_fails_closed_on_unreadable_record_or_missing_plan(tmp_path):
-    _plan(tmp_path, ["u1", "u2"])
+def test_validate_fails_closed_on_unreadable_record_or_missing_batch_tag(tmp_path):
     with patch.object(wt, "STATE_DIR", tmp_path):
-        mk, text = wt.validate(FakeApi({"u1": _det()}, fail={"u2"}), "2026-11-02")
+        mk, text = wt.validate(FakeApi({"u1": _det(), "u2": _det()}, fail={"u2"}), "2026-11-02")
         assert not mk["ok"] and "unreadable" in mk["problem"] and "will NOT launch" in text
-        (tmp_path / "topup_plan_2026-11-02.json").unlink()
-        assert not wt.validate(FakeApi({}), "2026-11-02")[0]["ok"]
+        mk = wt.validate(FakeApi({"u1": _det()}, tags=FakeApi.TAGS[:2]), "2026-11-02")[0]
+        assert not mk["ok"] and "not found" in mk["problem"]
+
+
+def test_validate_ignores_a_later_plan_file(tmp_path):
+    """Sunday's dry run re-plans and overwrites the plan file; the batch must not change."""
+    _plan(tmp_path, ["other"])
+    with patch.object(wt, "STATE_DIR", tmp_path):
+        mk, _ = wt.validate(FakeApi({"u1": _det()}), "2026-11-02")
+    assert mk["ok"] and mk["uuids"] == ["u1"]
 
 
 def test_validate_excludes_ambiguous_stop(tmp_path):
-    _plan(tmp_path, ["u1"])
     api = FakeApi({"u1": _det([_phone(PRIMARY), _phone(OTHER, "DNC", tags=())])}, logs={"u1": []})
     with patch.object(wt, "STATE_DIR", tmp_path):
         mk, _ = wt.validate(api, "2026-11-02")
@@ -337,7 +362,6 @@ def test_review_tags_problem_fails_closed():
 
 def test_validate_excludes_tagged_and_duplicate_records(tmp_path):
     nums = {"u1": "8165550011", "u2": "8165550012", "u3": "8165550013", "u4": "8165550013"}
-    _plan(tmp_path, ["u1", "u2", "u3", "u4"], nums)
     api = FakeApi({"u1": _det_n(nums["u1"]), "u2": _det_n(nums["u2"], tags=(BATCH, "SMS Line A", HOLD)),
                    "u3": _det_n(nums["u3"]), "u4": _det_n(nums["u4"])})
     with patch.object(wt, "STATE_DIR", tmp_path):
@@ -348,9 +372,8 @@ def test_validate_excludes_tagged_and_duplicate_records(tmp_path):
 
 
 def test_validate_fails_closed_when_review_tags_unconfirmed(tmp_path):
-    _plan(tmp_path, ["u1"])
     with patch.object(wt, "STATE_DIR", tmp_path):
-        mk, text = wt.validate(FakeApi({"u1": _det()}, tags=[]), "2026-11-02")
+        mk, text = wt.validate(FakeApi({"u1": _det()}, tags=FakeApi.TAGS[2:]), "2026-11-02")
     assert not mk["ok"] and "review tag" in mk["problem"] and "will NOT launch" in text
 
 
@@ -441,8 +464,67 @@ def test_finished_drip_records_stay_ineligible(tmp_path):
     assert wt.skip_reason(d) == "assigned"
     assert wt.skip_reason(dict(d, assigned_to=None, status=None)) == "batch/line tag"
     nums = {"u1": "8165550011"}
-    _plan(tmp_path, ["u1"], nums)
     api = FakeApi({"u1": _det_n(nums["u1"])}, drips={"u1": [{"status": "completed"}]})
     with patch.object(wt, "STATE_DIR", tmp_path):
         mk, _ = wt.validate(api, "2026-11-02")
     assert "u1" not in mk["uuids"] and "has drip history" in mk["excluded"]["u1"]
+
+
+# ------------------------------------------------------------ suppression and owner-level checks
+
+def test_suppress_reason_equity_sold_entity():
+    today = dt.date(2026, 11, 2)
+    assert wt.suppress_reason(_det(), today) is None
+    assert wt.suppress_reason(dict(_det(), equity_percent=None), today) is None        # unknown equity kept
+    assert "equity" in wt.suppress_reason(dict(_det(), equity_percent=12.5), today)
+    assert wt.suppress_reason(dict(_det(), equity_percent=30), today) is None
+    assert "sold" in wt.suppress_reason(dict(_det(), last_sold="2026-01-15"), today)
+    assert wt.suppress_reason(dict(_det(), last_sold="2025-10-01"), today) is None
+    assert "Entity Owner" in wt.suppress_reason(_det(tags=(BATCH, "entity owner")), today)
+    assert "Classification" in wt.suppress_reason(_det(tags=("Entity Classification Hold",)), today)
+    assert "litigator" in wt.suppress_reason(_det([_phone(PRIMARY, tags=("Dial First", "Litigator"))]), today)
+
+
+def test_validate_excludes_owner_declined_or_active_elsewhere(tmp_path):
+    nums = {"u1": "8165550011", "u2": "8165550012", "u3": "8165550013"}
+    api = FakeApi({"u1": _det_n(nums["u1"]), "u2": _det_n(nums["u2"], owner={"uuid": "o2"}),
+                   "u3": _det_n(nums["u3"]),
+                   "d2": _det_n("8165559999", tags=(), status="not_interested", owner={"uuid": "o2"}),   # same owner
+                   "d3": _det([_phone("8165559998"), _phone(nums["u3"])], tags=(), status="new_lead",
+                              owner={"uuid": "o3x"})})                                                   # same phone
+    with patch.object(wt, "STATE_DIR", tmp_path):
+        mk, _ = wt.validate(api, "2026-11-02")
+    assert mk["ok"] and mk["uuids"] == ["u1"]
+    assert "declined (not_interested) on another property" in " ".join(mk["excluded"]["u2"])
+    assert "active (new_lead)" in " ".join(mk["excluded"]["u3"])
+
+
+def _fresh(n, **kw):
+    """An unworked P1 rung record: what the top-up may pick."""
+    d = _det_n(n, tags=("Priority 1",), **kw)
+    d["assigned_to"] = None
+    d["owner"].update(type="person", primary_phone=None)
+    d["_list"] = "L0"
+    return d
+
+
+class PlanApi(FakeApi):
+    def call(self, path, method="GET", body=None):
+        if path.startswith("/api/internal/list/"):
+            return {"results": [{"uuid": f"L{i}", "title": wt.LIST_PREFIX + r} for i, r in enumerate(wt.RUNGS)]}
+        return super().call(path, method, body)
+
+
+def test_pinned_plan_takes_exactly_the_reviewed_batch(tmp_path):
+    props = {u: _fresh(f"81655500{i:02d}", owner={"uuid": f"o-{u}"}) for i, u in enumerate(("u1", "u2", "u3", "u4"))}
+    props["x9"] = _det_n(props["u4"]["owner"]["phones"][0]["number"], tags=(), status="not_interested")
+    api = PlanApi(props, tags=FakeApi.TAGS + [{"uuid": "t-p1", "title": wt.P1_TAG}])
+    p01 = {"uuid": wt.PRESET_01_UUID, "filters": {"must": {"any_lists": ["L0"]}}}
+    f = tmp_path / "batch.csv"
+    f.write_text("seq,line,property_uuid\n1,B,u3\n2,A,u1\n3,C,u4\n4,D,missing\n")
+    with patch.object(wt, "load_presets", return_value=(p01, {"uuid": "p02"})):
+        p = wt.plan(api, 45, pinned=wt.load_pinned(str(f)))
+    assert [(r["uuid"], r["line"]) for r in p["eligible"]] == [("u3", "B"), ("u1", "A")]
+    assert p["pinned"] and not p["mail_only"] and p["index_unreadable"] == 0
+    assert any(k.startswith("owner-level") for k in p["skipped"])           # u4 shares a decliner's phone
+    assert p["skipped"]["pinned record not in a P1 rung search"] == 1         # 'missing'

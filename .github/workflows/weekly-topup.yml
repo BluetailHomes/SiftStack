@@ -19,6 +19,12 @@ name: Weekly Top-up
 # pm-text-sender.yml only. A second run is still safe, because `apply` refuses
 # when that Monday's Batch tag already exists (unless --force), and the
 # concurrency group makes overlapping starts queue instead of running together.
+#
+# After the top-up, `validate` re-reads every record carrying that Monday's
+# Batch tag and writes topup_ready_<Monday>.json into this run's artifact;
+# am-start (pm-text-sender.yml) downloads the newest successful run's marker
+# and launches only what it lists. A failed validation does not fail the run,
+# so its not-ok marker is still the newest one and Monday launches nothing.
 
 on:
   workflow_dispatch:
@@ -36,7 +42,7 @@ on:
 jobs:
   weekly-topup:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     concurrency:
       group: weekly-topup
       cancel-in-progress: false
@@ -58,11 +64,20 @@ jobs:
           if [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 18:00-20:00"; fi
           echo "python src/weekly_topup.py $ARGS"
           python src/weekly_topup.py $ARGS
+      - name: Validate Monday's batch and write the readiness marker
+        env:
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          ARGS="validate --slack"
+          if [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 18:00-20:00"; fi
+          python src/weekly_topup.py $ARGS || echo "::warning::Monday's batch did not validate; am-start will launch nothing"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: weekly-topup-${{ github.run_id }}
           path: |
             output/pm_texts/topup_plan_*
+            output/pm_texts/topup_ready_*
             output/account_backups/topup_write_*
           if-no-files-found: ignore
