@@ -25,6 +25,12 @@ name: Weekly Top-up
 # am-start (pm-text-sender.yml) downloads the newest successful run's marker
 # and launches only what it lists. A failed validation does not fail the run,
 # so its not-ok marker is still the newest one and Monday launches nothing.
+#
+# Before the top-up, src/p1_enrich.py scores unscored phones (Trestle) and skip
+# traces phoneless person owners (Tracerfy) on records SiftMap auto-added to the
+# rung lists, so they can make this week's batch. Paid + writes only when the
+# repo variable P1_ENRICH_LIVE is "true"; continue-on-error, so it never blocks
+# the top-up.
 
 on:
   workflow_dispatch:
@@ -53,6 +59,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Enrich auto-added P1 records (dry run unless P1_ENRICH_LIVE is "true")
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          TRESTLE_API_KEY: ${{ secrets.TRESTLE_API_KEY }}
+          TRACERFY_API_KEY: ${{ secrets.TRACERFY_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          LIVE: ${{ vars.P1_ENRICH_LIVE }}
+        run: |
+          if [ "${{ inputs.gate }}" = "true" ] && [ "$(python -c "import sys; sys.path.insert(0, 'src'); from pm_text_sender import _in_window; print(_in_window('18:00-20:00'))")" != "True" ]; then
+            echo "Outside 18:00-20:00 Central; skipping enrich"; exit 0
+          fi
+          ARGS="--slack"
+          if [ "$LIVE" = "true" ]; then ARGS="$ARGS --live"; fi
+          echo "python src/p1_enrich.py $ARGS"
+          python src/p1_enrich.py $ARGS
       - name: Weekly top-up (dry run unless TOPUP_LIVE is "true")
         env:
           REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
@@ -80,4 +103,6 @@ jobs:
             output/pm_texts/topup_plan_*
             output/pm_texts/topup_ready_*
             output/account_backups/topup_write_*
+            output/pm_texts/p1_enrich_plan_*
+            output/account_backups/p1_enrich_write_*
           if-no-files-found: ignore
