@@ -528,3 +528,16 @@ def test_pinned_plan_takes_exactly_the_reviewed_batch(tmp_path):
     assert p["pinned"] and not p["mail_only"] and p["index_unreadable"] == 0
     assert any(k.startswith("owner-level") for k in p["skipped"])           # u4 shares a decliner's phone
     assert p["skipped"]["pinned record not in a P1 rung search"] == 1         # 'missing'
+
+
+def test_plan_takes_lowest_doors_per_deal_rung_first():
+    assert [wt.doors_per_deal(r) for r in wt.RUNGS] == sorted(wt.doors_per_deal(r) for r in wt.RUNGS)
+    old, new = _fresh("8165550101", owner={"uuid": "o-old"}), _fresh("8165550102", owner={"uuid": "o-new"})
+    old["_list"] = "L3"            # a rung already in preset 01, higher doors per deal
+    new["_list"] = "L0"            # e.g. a fresh SiftMap auto-add in the lowest rung, not in preset 01 yet
+    api = PlanApi({"old": old, "new": new}, tags=FakeApi.TAGS + [{"uuid": "t-p1", "title": wt.P1_TAG}])
+    p01 = {"uuid": wt.PRESET_01_UUID, "filters": {"must": {"any_lists": ["L3"]}}}
+    with patch.object(wt, "load_presets", return_value=(p01, {"uuid": "p02"})):
+        p = wt.plan(api, 1)
+    assert [r["uuid"] for r in p["eligible"]] == ["new"]
+    assert p["rungs_added"] == [wt.RUNGS[0]] and p["rungs_added_uuids"] == ["L0"]
