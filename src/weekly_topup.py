@@ -59,8 +59,9 @@ from pm_text_sender import (  # noqa: E402
 PRESET_01_UUID = "4881671f-526c-440f-add2-97564c89d069"
 P1_TAG = "Priority 1"
 LIST_PREFIX = "Jackson - Priority 1 - "
-# Rungs in the order they get added to presets 01/02 (lowest doors-per-deal first among what's left).
-RUNGS = [
+# P1 rung lists. Always worked lowest doors-per-deal first (Kaycie 2026-11-07): rungs already in presets
+# 01/02 get no head start, and SiftMap auto-adds compete inside their rung like any other record.
+_RUNGS = [
     "Out-of-State + Vacant - 12.3 doors per deal",
     "Free & Clear + Out-of-State + Vacant - 10.7 doors per deal",
     "Free & Clear + Vacant - 18.9 doors per deal",
@@ -72,6 +73,14 @@ RUNGS = [
     "Estate Sale - 13.9 doors per deal",
     "Bad Credit + Out-of-State - 19.3 doors per deal",
 ]
+
+
+def doors_per_deal(rung: str) -> float:
+    m = re.search(r"([\d.]+) doors per deal", rung)
+    return float(m.group(1)) if m else float("inf")
+
+
+RUNGS = sorted(_RUNGS, key=doors_per_deal)
 DEFAULT_TARGET = 150                 # 14 per line on Lines A-K (approved 2026-11-06; was 45 from 2026-10-27)
 LINES = tuple("ABCDEFGHIJK")       # even round-robin (F-K added 2026-11-06; D/E ran a light 8-each first week on 10/26)
 LINE_CAP = 14                        # new records per SMS line per Monday = am-start's line_capacity() at 30 texts/line
@@ -257,7 +266,6 @@ def plan(api: Sift, target: int, pinned: dict | None = None, idx: OwnerIndex | N
         rungs.append({"name": r, "uuid": lst["uuid"], "count": lst.get("properties_count") or lst.get("count"),
                       "used": lst["uuid"] in used_uuids})
     used = [r for r in rungs if r["used"]]
-    unused = [r for r in rungs if not r["used"]]
 
     tags = _rows(api.call("/api/internal/tag/?offset=0&limit=10000&ordering=title"))
     p1_uuid = next((t["uuid"] for t in tags if t.get("title") == P1_TAG), None)
@@ -273,12 +281,12 @@ def plan(api: Sift, target: int, pinned: dict | None = None, idx: OwnerIndex | N
     never = base.setdefault("must_not", {}).setdefault("any_tags", [])
     never += [u for u, _ in (STOP_REVIEW_TAG, POST_SEQ_HOLD_TAG) if u not in never]
 
-    # Work the used rungs first (leftovers), then add new rungs one at a time until the batch fills.
+    # Lowest doors-per-deal first, used or not; a new rung is added to presets 01/02 once it supplies a record.
     idx = idx or OwnerIndex(api)
     if pinned is not None:
         target = len(pinned)
     eligible, mail_only, skipped, seen, pool_by_rung, added = [], [], Counter(), set(), {}, []
-    for r in used + unused:
+    for r in rungs:
         if len(eligible) >= target or (pinned is not None and seen >= set(pinned)):
             break
         must = dict(base, any_lists=[r["uuid"]], any_tags=[p1_uuid])
