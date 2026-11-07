@@ -135,15 +135,15 @@ def test_record_stop_unreadable_logs_holds():
 
 # ------------------------------------------------------------ capacity
 
-def test_line_capacity_ceiling_is_nine():
-    assert pts.line_capacity(0, 0, 0) == 9
+def test_line_capacity_monday_room():
+    assert pts.line_capacity(0, 0, 0) == 14       # (30-0-0-2)//2, under the 30 ceiling
 
 
 def test_line_capacity_counts_sent_running_and_started():
-    assert pts.line_capacity(0, 6, 0) == 6        # (20-6-0-2)//2
-    assert pts.line_capacity(0, 0, 5) == 4        # (20-0-10-2)//2
-    assert pts.line_capacity(7, 0, 0) == 2        # ceiling 9 minus 7 already started
-    assert pts.line_capacity(0, 19, 3) == 0       # never negative
+    assert pts.line_capacity(0, 6, 0) == 11       # (30-6-0-2)//2
+    assert pts.line_capacity(0, 0, 5) == 9        # (30-0-10-2)//2
+    assert pts.line_capacity(25, 0, 0) == 5       # ceiling 30 minus 25 already started
+    assert pts.line_capacity(0, 29, 3) == 0       # never negative
 
 
 # ------------------------------------------------------------ am-start gate
@@ -451,8 +451,8 @@ def test_load_capacity_counts_running_drips_per_line():
             patch.object(pts, "count_sent_by_line", return_value=(Counter({pts.SMS_LINE_NUMBERS["SMS Line B"]: 4}), Counter())), \
             patch.object(pts, "drip_histories", return_value=rows):
         cap = pts.load_capacity(None, Counter())
-    assert cap["SMS Line B"] == {"sent": 4, "running": 3, "started": 0, "capacity": 4}   # (20-4-6-2)//2
-    assert cap["SMS Line A"]["capacity"] == 9
+    assert cap["SMS Line B"] == {"sent": 4, "running": 3, "started": 0, "capacity": 9}   # (30-4-6-2)//2
+    assert cap["SMS Line A"]["capacity"] == 14
 
 
 # ------------------------------------------------------------ finished drips stay out of new batches

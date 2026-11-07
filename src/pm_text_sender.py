@@ -65,7 +65,7 @@ CALLBACK_LINE = "8169553574"
 LEGACY_LINES = {"8167889386", "4057641708", "5055201714"}
 LEGACY_TEXT_CAP = 20
 LEGACY_TAG_PREFIX = "Legacy Recall"
-MAX_PER_LINE = 20
+MAX_PER_LINE = 30           # raised from 20 on 2026-11-06 (Kaycie) for the 150-record week
 MIN_VM_SECONDS = 20
 SHIFT = ("10:00", "18:00")   # Rahaf's shift, Central, no lunch (her request, from 2026-10-26)
 DIAL_FLOOR = 150             # daily dial floor (rahaf-kpi-scorecard production standards)
@@ -941,10 +941,10 @@ def run_audit_check(args) -> int:
 # ----------------------------------------------------------------- am start
 PRESET_01_TITLE = "01. New - Set to Prospecting"
 SMS_LINE_TAGS = ("SMS Line A", "SMS Line B", "SMS Line C", "SMS Line D", "SMS Line E")
-# Temporary reduced cohort (approved 2026-10-27): at most 9 new records per line per Monday.
-# 9 is a ceiling, not a target: line_capacity() lowers it for texts the line already sent today,
+# At most 30 new records per line per Monday (150 across 5 lines, approved 2026-11-06; was 9 from 2026-10-27).
+# 30 is a ceiling, not a target: line_capacity() lowers it for texts the line already sent today,
 # drips still running on it, and the chance that DataSift sends a new record's opener twice.
-MAX_NEW_PER_LINE = 9
+MAX_NEW_PER_LINE = 30
 CAP_MARGIN = 2
 
 

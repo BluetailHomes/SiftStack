@@ -68,10 +68,13 @@ RUNGS = [
     "Absentee + High Equity + Vacant - 19.4 doors per deal",
     "Senior + Vacant - 23.0 doors per deal",
     "Absentee + Vacant - 23.8 doors per deal",
+    # Added 2026-11-06 (Kaycie): non-Vacant P1 rungs that still have phoned, unworked records.
+    "Estate Sale - 13.9 doors per deal",
+    "Bad Credit + Out-of-State - 19.3 doors per deal",
 ]
-DEFAULT_TARGET = 45                  # temporary reduced cohort (approved 2026-10-27)
+DEFAULT_TARGET = 150                 # 30 per line (approved 2026-11-06; was 45 from 2026-10-27)
 LINES = ("A", "B", "C", "D", "E")   # even round-robin (D/E ran a light 8-each first week on 10/26)
-LINE_CAP = 9                         # new records per SMS line per Monday; am-start may start fewer
+LINE_CAP = 30                        # new records per SMS line per Monday; am-start may start fewer
 MAIL_ONLY_TAG = "Mail Only"
 TAG_CHUNK = 50
 BACKUP_DIR = STATE_DIR.parent / "account_backups"
