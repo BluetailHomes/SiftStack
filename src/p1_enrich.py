@@ -52,6 +52,8 @@ import uuid as uuidlib
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
+import requests
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pm_text_sender import STATE_DIR, Sift, _best_primary, _env, _slack, ct_now  # noqa: E402
 from weekly_topup import BACKUP_DIR, LIST_PREFIX, P1_TAG, RUNGS, _rows, add_tags, digits, ensure_tag, skip_reason  # noqa: E402
@@ -154,19 +156,24 @@ def _http(url: str, method="GET", data: bytes | None = None, headers: dict | Non
 
 def trestle(number: str, key: str) -> dict:
     """{'score', 'line_type', 'litigator'} or {'error'}; mirrors phone_validator.call_trestle."""
-    url = TRESTLE_URL + "?" + urllib.parse.urlencode({"phone": number, "add_ons": "litigator_checks"})
+    # requests, not urllib: urllib sends the header as "X-api-key" and Trestle's
+    # gateway 403s that casing (seen 2026-11-06/07; curl and requests get 200).
+    params = {"phone": number, "add_ons": "litigator_checks"}
     for attempt in range(3):
         try:
-            data = _http(url, headers={"x-api-key": key, "accept": "application/json"}, timeout=15)
-            lit = ((data.get("add_ons") or {}).get("litigator_checks") or {}).get("phone.is_litigator_risk")
-            return {"score": data.get("activity_score"), "line_type": data.get("line_type"), "litigator": bool(lit)}
-        except urllib.error.HTTPError as e:
-            if e.code == 403:
+            r = requests.get(TRESTLE_URL, params=params, timeout=15,
+                             headers={"x-api-key": key, "accept": "application/json", "user-agent": UA})
+        except requests.RequestException:
+            r = None
+        if r is not None:
+            if r.status_code == 403:
                 raise RuntimeError("Trestle rejected the API key (403)")
-            if e.code != 429 and e.code < 500:
-                return {"error": f"HTTP {e.code}"}
-        except (urllib.error.URLError, TimeoutError):
-            pass
+            if r.ok:
+                data = r.json()
+                lit = ((data.get("add_ons") or {}).get("litigator_checks") or {}).get("phone.is_litigator_risk")
+                return {"score": data.get("activity_score"), "line_type": data.get("line_type"), "litigator": bool(lit)}
+            if r.status_code != 429 and r.status_code < 500:
+                return {"error": f"HTTP {r.status_code}"}
         time.sleep(1.5 * 2 ** attempt)
     return {"error": "retries exhausted"}
 
