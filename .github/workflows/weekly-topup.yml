@@ -3,7 +3,7 @@ name: Weekly Top-up
 # Sunday-evening top-up of Rahaf's Jackson Priority 1 queue for the coming
 # Monday (see src/weekly_topup.py): picks the next records in doors-per-deal
 # order, assigns them to Rahaf, tags them "Batch YYYY-MM-DD" (the Monday) plus
-# one SMS Line A-E tag each (even round-robin), sets each owner's primary phone
+# one SMS Line A-K tag each (even round-robin), sets each owner's primary phone
 # to the best Dial First/Second mobile, tags records with no usable phone
 # "Mail Only", and points presets 01/02 at the new Batch tag. It never sets a
 # status: am-start does that Monday 9:50 AM Central.

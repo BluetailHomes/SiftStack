@@ -4,7 +4,7 @@ Why this exists
   Every Monday Rahaf's 5-day blitz starts on a fresh batch of Priority 1 records. Getting that
   batch ready was a hand-run routine (see memory note jackson-weekly-topup-routine): pick the next
   rung's list, pull unassigned/no-status records, assign them to Rahaf, tag `Batch YYYY-MM-DD` plus
-  one `SMS Line A-E`, set the owner's primary phone to the best Dial First/Second mobile, and point
+  one `SMS Line A-K`, set the owner's primary phone to the best Dial First/Second mobile, and point
   presets 01/02 at the new list and Batch tag. am-start (pm_text_sender.py) then sets them
   Prospecting at 9:50 Central, which starts the drip.
 
@@ -72,9 +72,9 @@ RUNGS = [
     "Estate Sale - 13.9 doors per deal",
     "Bad Credit + Out-of-State - 19.3 doors per deal",
 ]
-DEFAULT_TARGET = 150                 # 30 per line (approved 2026-11-06; was 45 from 2026-10-27)
-LINES = ("A", "B", "C", "D", "E")   # even round-robin (D/E ran a light 8-each first week on 10/26)
-LINE_CAP = 30                        # new records per SMS line per Monday; am-start may start fewer
+DEFAULT_TARGET = 150                 # 14 per line on Lines A-K (approved 2026-11-06; was 45 from 2026-10-27)
+LINES = tuple("ABCDEFGHIJK")       # even round-robin (F-K added 2026-11-06; D/E ran a light 8-each first week on 10/26)
+LINE_CAP = 14                        # new records per SMS line per Monday = am-start's line_capacity() at 30 texts/line
 MAIL_ONLY_TAG = "Mail Only"
 TAG_CHUNK = 50
 BACKUP_DIR = STATE_DIR.parent / "account_backups"
