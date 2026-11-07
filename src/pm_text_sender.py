@@ -942,20 +942,23 @@ def run_audit_check(args) -> int:
 # ----------------------------------------------------------------- am start
 PRESET_01_TITLE = "01. New - Set to Prospecting"
 SMS_LINE_TAGS = tuple(f"SMS Line {x}" for x in "ABCDEFGHIJK")   # F-K added 2026-11-06
-# At most 30 new records per line per Monday (approved 2026-11-06; was 9 from 2026-10-27). The weekly top-up
-# loads 14 per line across Lines A-K (150 total), which is what line_capacity() allows on a fresh Monday.
-# 30 is a ceiling, not a target: line_capacity() lowers it for texts the line already sent today,
-# drips still running on it, and the chance that DataSift sends a new record's opener twice.
-MAX_NEW_PER_LINE = 30
+# New records per line per Monday (Kaycie 2026-11-07): 18 on A-E, 10 on F-K while F-K warm up = 150.
+# The weekly top-up loads exactly this (weekly_topup.LINE_CAPS). These are ceilings, not targets:
+# line_capacity() lowers them for texts the line already sent today, drips still running on it,
+# and the chance that DataSift sends a new record's opener twice.
+MAX_NEW_PER_LINE = {**{f"SMS Line {x}": 18 for x in "ABCDE"}, **{f"SMS Line {x}": 10 for x in "FGHIJK"}}
+# Texts am-start budgets per line for that worst case. A-E get 38 so 18 openers fit even if every one
+# duplicates ((38-2)//2 = 18); expected sends are ~18/line, under October's 20. F-K stay at MAX_PER_LINE.
+START_BUDGET = {**dict.fromkeys(MAX_NEW_PER_LINE, MAX_PER_LINE), **{f"SMS Line {x}": 38 for x in "ABCDE"}}
 CAP_MARGIN = 2
 
 
-def line_capacity(started_today: int, sent_today: int, running_drips: int) -> int:
-    """New records a line can still take today without risking MAX_PER_LINE texts.
+def line_capacity(started_today: int, sent_today: int, running_drips: int, ceiling: int, budget: int) -> int:
+    """New records a line can still take today without risking `budget` texts.
     Each running drip may send today's text plus a duplicate (2), each new record its opener plus
     a duplicate (2), and CAP_MARGIN texts stay free for a manual reply."""
-    room = (MAX_PER_LINE - sent_today - 2 * running_drips - CAP_MARGIN) // 2
-    return max(0, min(MAX_NEW_PER_LINE - started_today, room))
+    room = (budget - sent_today - 2 * running_drips - CAP_MARGIN) // 2
+    return max(0, min(ceiling - started_today, room))
 
 
 def _preset_must(api: Sift, title_prefix: str) -> dict:
@@ -989,7 +992,8 @@ def load_capacity(api: Sift, started_today: Counter) -> dict[str, dict]:
     out = {}
     for tag in SMS_LINE_TAGS:
         k = {"sent": sent[SMS_LINE_NUMBERS[tag]], "running": running[tag], "started": started_today[tag]}
-        out[tag] = {**k, "capacity": line_capacity(k["started"], k["sent"], k["running"])}
+        out[tag] = {**k, "capacity": line_capacity(k["started"], k["sent"], k["running"],
+                                                   MAX_NEW_PER_LINE[tag], START_BUDGET[tag])}
     return out
 
 
@@ -1077,7 +1081,7 @@ def plan_am_start(api: Sift, candidates: list[str], batch_tag: str | None, capac
         if not why and left.get(e["line"], 0) <= 0:
             c = capacity.get(e["line"]) or {}
             why = (f"{e['line']} has no room today (sent {c.get('sent')}, running drips {c.get('running')}, "
-                   f"started {c.get('started')}, ceiling {MAX_NEW_PER_LINE})")
+                   f"started {c.get('started')}, ceiling {MAX_NEW_PER_LINE.get(e['line'])})")
         if why:
             held.append({**e, "why": why})
         else:

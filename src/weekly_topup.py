@@ -81,9 +81,11 @@ def doors_per_deal(rung: str) -> float:
 
 
 RUNGS = sorted(_RUNGS, key=doors_per_deal)
-DEFAULT_TARGET = 150                 # 14 per line on Lines A-K (approved 2026-11-06; was 45 from 2026-10-27)
-LINES = tuple("ABCDEFGHIJK")       # even round-robin (F-K added 2026-11-06; D/E ran a light 8-each first week on 10/26)
-LINE_CAP = 14                        # new records per SMS line per Monday = am-start's line_capacity() at 30 texts/line
+# New records per SMS line per Monday (Kaycie 2026-11-07): 18 on A-E, 10 on F-K while they warm up
+# (F-K added 2026-11-06; D/E ran a light 8-each first week on 10/26). Must match am-start's MAX_NEW_PER_LINE.
+LINE_CAPS = {**dict.fromkeys("ABCDE", 18), **dict.fromkeys("FGHIJK", 10)}
+LINES = tuple(LINE_CAPS)
+DEFAULT_TARGET = sum(LINE_CAPS.values())   # 150 (approved 2026-11-06; was 45 from 2026-10-27)
 MAIL_ONLY_TAG = "Mail Only"
 TAG_CHUNK = 50
 BACKUP_DIR = STATE_DIR.parent / "account_backups"
@@ -108,7 +110,20 @@ def next_monday(today: dt.date) -> dt.date:
 
 
 def line_plan(n: int) -> list[str]:
-    return [LINES[i % len(LINES)] for i in range(n)]
+    """Round-robin over the lines, skipping any already at its cap. A short batch spreads evenly;
+    past the total cap it keeps cycling, and apply()/validate refuse the overload."""
+    out, load = [], Counter()
+    while len(out) < n:
+        room = [ln for ln in LINES if load[ln] < LINE_CAPS[ln]] or list(LINES)
+        for ln in room[:n - len(out)]:
+            out.append(ln)
+            load[ln] += 1
+    return out
+
+
+def over_cap(per_line: Counter) -> dict:
+    """{line: load} for lines loaded past their cap; keys may be 'A' or 'SMS Line A'."""
+    return {ln: n for ln, n in per_line.items() if n > LINE_CAPS.get(str(ln).removeprefix("SMS Line "), 0)}
 
 
 def _d10(n) -> str:
@@ -446,8 +461,8 @@ def apply(api: Sift, p: dict, batch_date: str, force: bool = False) -> str:
     batch_title = f"Batch {batch_date}"
     el, mail = p["eligible"], p["mail_only"]
     per_line = Counter(r["line"] for r in el)
-    if max(per_line.values(), default=0) > LINE_CAP:
-        raise RuntimeError(f"Line load {dict(per_line)} exceeds {LINE_CAP}/line; add a line or lower --target")
+    if over := over_cap(per_line):
+        raise RuntimeError(f"Line load {over} exceeds the line caps {LINE_CAPS}; add a line or lower --target")
     if p.get("index_unreadable"):
         raise RuntimeError(f"{p['index_unreadable']} records behind the owner-level check were unreadable")
     if batch_title in tag_uuids(api) and not force:
@@ -588,8 +603,8 @@ def validate(api: Sift, batch_date: str, idx: OwnerIndex | None = None) -> tuple
             marker["problem"] = f"{len(unread)} records unreadable"
         elif idx and idx.unreadable:
             marker["problem"] = f"{idx.unreadable} records behind the owner-level check unreadable"
-        elif max(per_line.values(), default=0) > LINE_CAP:
-            marker["problem"] = f"line load {dict(per_line)} exceeds {LINE_CAP}"
+        elif over := over_cap(per_line):
+            marker["problem"] = f"line load {over} exceeds the line caps"
         elif not marker["uuids"]:
             marker["problem"] = "no record passed validation"
     marker["ok"] = not marker["problem"]
