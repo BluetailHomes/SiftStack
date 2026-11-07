@@ -58,14 +58,15 @@ CALLER_EMAIL = "rahaf@bluetailhomes.com"
 CALLER_USER_UUID = "7cf06756-3bca-41be-9c02-ccc27b954007"
 PM_LINES = ["8166084051", "8167100226", "8167100554"]          # afternoon voicemail texts
 CALL_LINES = {"8167889485", "8167595422", "8167100448", "8167100146"}
-DRIP_LINES = {"8162545235", "8169553316", "8167889952", "8168971724", "8168971637"}
+DRIP_LINES = {"8162545235", "8169553316", "8167889952", "8168971724", "8168971637",
+              "8166833277", "8166669978", "8169553059", "8163291107", "8166436610", "8169553022"}   # F-K added 2026-11-06
 CALLBACK_LINE = "8169553574"
 # Legacy follow-up lines: KC (816) 788-9386, OK (405) 764-1708, NM (505) 520-1714.
 # Each lead is called, voicemailed and texted from its own market's line.
 LEGACY_LINES = {"8167889386", "4057641708", "5055201714"}
 LEGACY_TEXT_CAP = 20
 LEGACY_TAG_PREFIX = "Legacy Recall"
-MAX_PER_LINE = 20
+MAX_PER_LINE = 30           # raised from 20 on 2026-11-06 (Kaycie) for the 150-record week
 MIN_VM_SECONDS = 20
 SHIFT = ("10:00", "18:00")   # Rahaf's shift, Central, no lunch (her request, from 2026-10-26)
 DIAL_FLOOR = 150             # daily dial floor (rahaf-kpi-scorecard production standards)
@@ -532,7 +533,7 @@ def drop_drip_primaries(api: Sift, to_send: list[dict], skipped: list[dict], mod
 # The P1 morning drip: 5 texts, one day apart, each 86400s after the last one actually went out,
 # so sends drift later every day. Its line comes from the drip's title ("... Morning Texts Line C ...").
 DRIP_SENDS = 5
-_DRIP_LINE_RE = re.compile(r"Morning Texts (Line [A-E])")
+_DRIP_LINE_RE = re.compile(r"Morning Texts (Line [A-K])")
 
 
 def drip_rows(api: Sift, uuid: str) -> list[dict]:
@@ -940,11 +941,12 @@ def run_audit_check(args) -> int:
 
 # ----------------------------------------------------------------- am start
 PRESET_01_TITLE = "01. New - Set to Prospecting"
-SMS_LINE_TAGS = ("SMS Line A", "SMS Line B", "SMS Line C", "SMS Line D", "SMS Line E")
-# Temporary reduced cohort (approved 2026-10-27): at most 9 new records per line per Monday.
-# 9 is a ceiling, not a target: line_capacity() lowers it for texts the line already sent today,
+SMS_LINE_TAGS = tuple(f"SMS Line {x}" for x in "ABCDEFGHIJK")   # F-K added 2026-11-06
+# At most 30 new records per line per Monday (approved 2026-11-06; was 9 from 2026-10-27). The weekly top-up
+# loads 14 per line across Lines A-K (150 total), which is what line_capacity() allows on a fresh Monday.
+# 30 is a ceiling, not a target: line_capacity() lowers it for texts the line already sent today,
 # drips still running on it, and the chance that DataSift sends a new record's opener twice.
-MAX_NEW_PER_LINE = 9
+MAX_NEW_PER_LINE = 30
 CAP_MARGIN = 2
 
 
@@ -1172,7 +1174,9 @@ def run_am_start(args) -> int:
 EXTRA_TEMPLATE = "Hi, trying to reach {first} about {street}. Is this still a good number? - Britney"
 EXTRA_FOLLOWUP_TEMPLATE = "Following up: is this {first}'s number? It's about {street}. - Britney"
 SMS_LINE_NUMBERS = {"SMS Line A": "8162545235", "SMS Line B": "8169553316", "SMS Line C": "8167889952",
-                    "SMS Line D": "8168971724", "SMS Line E": "8168971637"}
+                    "SMS Line D": "8168971724", "SMS Line E": "8168971637",
+                    "SMS Line F": "8166833277", "SMS Line G": "8166669978", "SMS Line H": "8169553059",
+                    "SMS Line I": "8163291107", "SMS Line J": "8166436610", "SMS Line K": "8169553022"}
 EXTRA_TAGS = ("Dial First", "Dial Second", "Dial Third", "Dial Fourth")
 EXTRA_OK_MARKS = {"", "UNKNOWN", "NO_ANSWER"}
 EXTRA_LEDGER = STATE_DIR / "extra_texts_sent.json"
@@ -1371,6 +1375,7 @@ OUR_LINES = {
     "8167100554", "8167889485", "8167595422", "8167100448", "8167100146",
     "8169553574", "8167889386", "5054941645", "4057641708", "5055201714",
     "8168971724", "8168971637",
+    "8166833277", "8166669978", "8169553059", "8163291107", "8166436610", "8169553022",
 }
 LINE_ALERT_AT = 20
 LINE_ALERT_STEP = 5
