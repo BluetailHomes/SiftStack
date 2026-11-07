@@ -290,7 +290,8 @@ _ACK_RE = re.compile(r"^(ok(ay)?|k|kk|thanks?( you)?|thx|ty|sounds good|got it|w
 
 
 # An opt-out text: the SMS responder marks that number DNC itself, so no reply is owed.
-_STOP_RE = re.compile(r"^(stop|stop all|unsubscribe|cancel|end|quit|remove me|opt out)$", re.I)
+# Same list as sms_auto_responder.OPT_OUT_KEYWORDS (FCC 26-67 keywords plus "stop all"/"remove me").
+_STOP_RE = re.compile(r"^(stop|stop all|unsubscribe|cancel|end|quit|revoke|remove me|opt out|optout)$", re.I)
 DNC_MARKS = {"DNC", "CORRECT_DNC", "WRONG_DNC"}
 
 

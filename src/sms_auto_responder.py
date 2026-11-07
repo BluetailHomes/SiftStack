@@ -60,6 +60,18 @@ CATEGORIES_SAFE = {
 CATEGORIES_HUMAN = {"call_me", "price_question", "interest", "probate_death", "already_sold", "unclear"}
 ALL_CATEGORIES = CATEGORIES_SAFE | CATEGORIES_HUMAN
 
+# Opt-out keywords. FCC 26-67 (effective 2026-11-25) lets a texter limit opt-outs to reply keywords
+# only if all seven work: STOP, QUIT, END, REVOKE, OPT OUT, CANCEL, UNSUBSCRIBE. A reply that is just
+# one of these is a stop without asking the classifier. Longer wording ("stop texting me about my
+# house") still goes to the classifier and the rulebook.
+OPT_OUT_KEYWORDS = {"stop", "quit", "end", "revoke", "opt out", "optout", "cancel", "unsubscribe",
+                    "stop all", "remove me"}
+
+
+def is_opt_out_keyword(text: str) -> bool:
+    """True when the whole message is one opt-out keyword (case, punctuation and spacing ignored)."""
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", text or "")).strip().lower() in OPT_OUT_KEYWORDS
+
 # Drip stop (stop_drip_if_needed): any reply from the dripped primary phone, or a STOP from any
 # number, pulls the record from its running drip. Applied even in draft mode: removing a record
 # from a drip is bookkeeping, not a reply. Added 2026-10-21 for stop-type categories after a
@@ -360,6 +372,10 @@ def _ask(prompt: str, model: str) -> dict | None:
 
 
 def classify(rules: str, ctx: dict, model: str) -> dict | None:
+    if is_opt_out_keyword(ctx["inbound_text"]):
+        return {"category": "stop", "reply": "", "phone_status": "DNC", "property_status": "Not Interested",
+                "note": "", "needs_human": False, "confidence": 1.0,
+                "reason": "opt-out keyword (FCC 26-67); not sent to the classifier"}
     prompt = (
         "RULEBOOK:\n" + rules + "\n\nRECORD:\n" + json.dumps(ctx["record"], indent=1)
         + "\n\nTHREAD (oldest first):\n" + "\n".join(f"[{m['when']}] {m['from']}: {m['text']}" for m in ctx["thread"])
