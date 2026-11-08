@@ -48,6 +48,13 @@ def test_eligible_refusals():
     assert "under 90 days" in od.eligible(_d(last_obituary_date="2026-10-01"), TODAY)
 
 
+def test_eligible_stays_inside_the_p1_neighborhoods():
+    assert od.eligible(_d(neighborhood="Vineyard - Kansas City"), TODAY) is None
+    assert od.eligible(_d(neighborhood="Fairlane - Kansas City, MO"), TODAY) is None
+    assert od.eligible(_d(neighborhood="Cler-mont"), TODAY) == "outside P1 neighborhoods"
+    assert od.eligible(_d(neighborhood=None), TODAY) is None     # missing data passes
+
+
 def test_missing_obituary_date_is_kept():
     assert od.eligible(_d(last_obituary_date=None), TODAY) is None
 
@@ -131,6 +138,18 @@ def test_living_note_warns_off_asking_for_the_deceased():
     note = od.living_note({"classification": "relative_deceased", "decedent_name": "Ruth Baynham",
                            "relationship_to_owner": "wife", "date_of_death": "2026-03-02", "confidence": "high"}, TODAY)
     assert "OWNER IS LIVING" in note and "Ruth Baynham (wife" in note and "Do not ask for the deceased" in note
+
+
+def test_plan_also_searches_the_siftmap_pull_tag(monkeypatch):
+    seen = []
+    api = Namespace(search=lambda must: seen.append(must) or [])
+    monkeypatch.setattr(od, "tag_uuids", lambda api: {od.PULL_TAG: "pull-uuid", od.RESEARCHED_TAG: "r-uuid"})
+    od.plan(api, "Jackson", TODAY)
+    assert seen[0]["any_tags"] == list(od.OBIT_TAGS) + ["pull-uuid"]
+    assert seen[0]["must_not"] == {"any_tags": ["r-uuid"]}
+    monkeypatch.setattr(od, "tag_uuids", lambda api: {})     # preset not created yet
+    od.plan(api, "Jackson", TODAY)
+    assert seen[1]["any_tags"] == list(od.OBIT_TAGS)
 
 
 # ----------------------------------------------------------------- write

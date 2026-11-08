@@ -60,6 +60,9 @@ from weekly_topup import (ACTIVE_STATUSES, BACKUP_DIR, DECLINE_STATUSES, _rows, 
                           ensure_tag, suppress_reason, tag_uuids)
 
 OBIT_TAGS = {"390ebcc0-277c-42da-938f-7ebd7cc01f1a": "Obit 3-6mo", "f91785a5-e043-4972-842e-3ae48054870e": "Obit 6mo+"}
+# Tag on the "Jackson - Obituary - P1 Neighborhoods" SiftMap auto-add preset. Its records may never get
+# the Obit age tags above, so plan() searches it too (once the preset has created it).
+PULL_TAG = "Obituary P1"
 RESEARCHED_TAG = "DP Researched"
 HEIR_PHONE_TAG, OWNER_LINE_TAG, SOURCE_TAG = "DP Heir", "DP Owner Line", "SmartSkip"
 MIN_OBIT_AGE_DAYS = 90       # Ty: give the family 3 months
@@ -71,6 +74,16 @@ TIER_ORDER = {"Dial First": 1, "Dial Second": 2, "Dial Third": 3, "Dial Fourth":
 CLOSE_RELS = {"Child", "Spouse", "Sibling"}
 LINE_TYPES = {"mobile": "MOBILE", "landline": "LANDLINE"}
 MODEL = "claude-opus-5-5"
+# The 25 neighborhoods on every "Jackson - Priority 1" SiftMap preset (2026-11-07). Paid research
+# stays inside them, like P1. A record with no neighborhood on file passes (never drop on missing data).
+P1_NEIGHBORHOODS = {"Jackson": frozenset(n.lower() for n in (
+    "Vineyard - Kansas City", "East Meyer 6", "Bristol - Independence", "Ruskin Heights",
+    "Rockwood - Independence", "Swope Park Campus", "South Town Fork Creek", "Oak Park Southwest",
+    "Noble And Gregory Ridge", "Blue Hills - Kansas City", "Marlborough Heights Marlborough Pride",
+    "Fairwood And Robandee", "North Town Fork Creek", "Vineyard Northwest", "Ruskin Hills",
+    "Maywood - Independence", "Fairlane - Kansas City", "Three Trails", "Robandee South",
+    "Ivanhoe Southwest", "Hickman Mills", "Cunningham Ridge", "Ivanhoe Southeast", "Wendell Phillips",
+    "Benton - Independence"))}
 
 
 def _title(t) -> str:
@@ -99,6 +112,9 @@ def eligible(d: dict, today: dt.date, county: str = "Jackson", state: str = "MO"
     a = d.get("address") or {}
     if county.lower() not in str(a.get("county") or "").lower() or str(a.get("state") or "").upper() != state:
         return "other county"
+    hood = re.sub(r",\s*mo$", "", str(d.get("neighborhood") or "").strip().lower())
+    if hood and county in P1_NEIGHBORHOODS and hood not in P1_NEIGHBORHOODS[county]:
+        return "outside P1 neighborhoods"
     o = d.get("owner") or {}
     if (o.get("type") or "person").lower() not in ("person", "individual") or not (o.get("first_name") or "").strip():
         return "not a person"
@@ -119,7 +135,7 @@ def eligible(d: dict, today: dt.date, county: str = "Jackson", state: str = "MO"
 def plan(api: Sift, county: str, today: dt.date) -> dict:
     tags = tag_uuids(api)
     skip = [tags[t] for t in (RESEARCHED_TAG, DP_REVIEW_TAG[1], DEEP_PROSPECTING_TAG[1]) if t in tags]
-    must = {"any_tags": list(OBIT_TAGS)}
+    must = {"any_tags": list(OBIT_TAGS) + ([tags[PULL_TAG]] if PULL_TAG in tags else [])}
     if skip:
         must["must_not"] = {"any_tags": skip}
     picks, counts = [], Counter()
@@ -468,7 +484,7 @@ def report(p: dict, res: dict | None, args) -> str:
         lines.append(f"  - {owner_name(d)}, {(d.get('address') or {}).get('street')} (obit {d.get('last_obituary_date') or '?'})")
     if res is None:
         lines.append(f"Est. cost if live: screen ~${n * SCREEN_COST:.2f} + SmartSkip up to ${min(n, args.max_skip) * smartskip.COST_PER_ROW:.2f}"
-                     f" + Trestle up to ${args.max_score * SCORE_COST:.2f}")
+                     f" + Trestle up to ${(args.max_score if n else 0) * SCORE_COST:.2f}")
         return "\n".join(lines)
     lines.append("Screened: " + ", ".join(f"{k} {v}" for k, v in res["classes"].items()))
     if args.live:
