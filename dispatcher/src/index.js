@@ -4,14 +4,18 @@
 // Each job is either a Central-time SLOT (hour/minute, weekdays, a few minutes of
 // tolerance so a cron that fires a minute late still matches) or an INTERVAL (every N
 // minutes inside a Central hour range, every day). `days` replaces the weekday rule with a
-// list of Central weekdays. `workflow` defaults to env.WORKFLOW_FILE; `inputs` replace the
+// list of Central weekdays; `onDate` (YYYY-MM-DD, Central) limits a job to that one day.
+// `workflow` defaults to env.WORKFLOW_FILE; `inputs` replace the
 // default {mode, gate:"true"} dispatch inputs.
 const JOBS = [
   { mode: "am-start", hour: 9, minute: 50 },
   { mode: "pm-texts", hour: 16, minute: 30 },
   { mode: "audit", hour: 19, minute: 15 },
-  // Sunday-evening top-up of Rahaf's Jackson P1 queue for Monday (src/weekly_topup.py).
-  { mode: "weekly-topup", hour: 18, minute: 0, days: ["Sun"], workflow: "weekly-topup.yml" },
+  // Friday-evening top-up of Rahaf's Jackson P1 queue for Monday (src/weekly_topup.py).
+  // Moved from Sunday; the last Sunday run is 2026-11-08 (delete that entry, and SUN,MON
+  // from its cron in wrangler.toml, any time after).
+  { mode: "weekly-topup", hour: 18, minute: 0, days: ["Fri"], workflow: "weekly-topup.yml" },
+  { mode: "weekly-topup", hour: 18, minute: 0, days: ["Sun"], onDate: "2026-11-08", workflow: "weekly-topup.yml" },
   // Inbound-text responder: poll every 5 minutes while sellers can be replying (the drip can
   // send until ~11 PM Central). 180-minute lookback so a missed poll never loses a reply.
   { mode: "sms-responder", everyMinutes: 5, fromHour: 7, toHour: 23, daily: true,
@@ -24,16 +28,19 @@ const WEEKDAYS = new Set(["Mon", "Tue", "Wed", "Thu", "Fri"]);
 function centralNow(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Chicago", hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit",
     weekday: "short", hour: "2-digit", minute: "2-digit",
   }).formatToParts(date);
   const get = (t) => parts.find((p) => p.type === t)?.value;
-  return { weekday: get("weekday"), hour: Number(get("hour")) % 24, minute: Number(get("minute")) };
+  return { date: `${get("year")}-${get("month")}-${get("day")}`, weekday: get("weekday"),
+    hour: Number(get("hour")) % 24, minute: Number(get("minute")) };
 }
 
 // All jobs whose rule matches this Central minute (a slot job and an interval job can coincide).
 function jobsForNow(now) {
   const mins = now.hour * 60 + now.minute;
   return JOBS.filter((j) => {
+    if (j.onDate && j.onDate !== now.date) return false;
     if (j.days) { if (!j.days.includes(now.weekday)) return false; }
     else if (!j.daily && !WEEKDAYS.has(now.weekday)) return false;
     if (j.everyMinutes) return now.hour >= j.fromHour && now.hour < j.toHour && now.minute % j.everyMinutes === 0;

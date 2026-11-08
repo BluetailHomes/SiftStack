@@ -1,7 +1,7 @@
 name: Weekly Top-up
 
-# Sunday-evening top-up of Rahaf's Jackson Priority 1 queue for the coming
-# Monday (see src/weekly_topup.py): picks the next records in doors-per-deal
+# Friday-evening top-up of Rahaf's Jackson Priority 1 queue for the coming
+# Monday (see src/weekly_topup.py; moved from Sunday after the 2026-11-08 run): picks the next records in doors-per-deal
 # order, assigns them to Rahaf, tags them "Batch YYYY-MM-DD" (the Monday) plus
 # one SMS Line A-K tag each (even round-robin), sets each owner's primary phone
 # to the best Dial First/Second mobile, tags records with no usable phone
@@ -12,7 +12,7 @@ name: Weekly Top-up
 # set to "true" (Settings -> Secrets and variables -> Actions -> Variables).
 #
 # Triggered by the Cloudflare Worker in dispatcher/ (siftstack-dispatcher)
-# Sundays 6:00 PM Central with gate=true, which limits it to 18:00-20:00
+# Fridays 6:00 PM Central with gate=true, which limits it to 18:00-20:00
 # Central. No GitHub `schedule:` cron, since GitHub ran crons hours late.
 #
 # No once-per-day guard step: src/workflow_run_guard.py is built for
@@ -31,6 +31,12 @@ name: Weekly Top-up
 # rung lists, so they can make this week's batch. Paid + writes only when the
 # repo variable P1_ENRICH_LIVE is "true"; continue-on-error, so it never blocks
 # the top-up.
+#
+# On a Friday it first runs the drip check (src/drip_exit_guard.py --friday):
+# classifies every P1 morning-text drip (completed / delayed / weekend-bound /
+# later-weekday / failed) and posts the report. It removes weekend-bound drips
+# only when the repo variable FRIDAY_DRIP_STOP_LIVE is "true"; otherwise it is
+# report-only. continue-on-error, so it never blocks the top-up.
 
 on:
   workflow_dispatch:
@@ -59,6 +65,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Friday drip check (removes weekend-bound drips only if FRIDAY_DRIP_STOP_LIVE is "true")
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          LIVE: ${{ vars.FRIDAY_DRIP_STOP_LIVE }}
+        run: |
+          if [ "$(TZ=America/Chicago date +%a)" != "Fri" ]; then
+            echo "Not Friday in Central; skipping drip check"; exit 0
+          fi
+          if [ "${{ inputs.gate }}" = "true" ] && [ "$(python -c "import sys; sys.path.insert(0, 'src'); from pm_text_sender import _in_window; print(_in_window('18:00-20:00'))")" != "True" ]; then
+            echo "Outside 18:00-20:00 Central; skipping drip check"; exit 0
+          fi
+          ARGS="--friday --slack"
+          if [ "$LIVE" = "true" ]; then ARGS="$ARGS --live"; fi
+          echo "python src/drip_exit_guard.py $ARGS"
+          python src/drip_exit_guard.py $ARGS
       - name: Enrich auto-added P1 records (dry run unless P1_ENRICH_LIVE is "true")
         continue-on-error: true
         timeout-minutes: 15
@@ -102,6 +126,7 @@ jobs:
           path: |
             output/pm_texts/topup_plan_*
             output/pm_texts/topup_ready_*
+            output/pm_texts/friday_drips_*
             output/account_backups/topup_write_*
             output/pm_texts/p1_enrich_plan_*
             output/account_backups/p1_enrich_write_*
