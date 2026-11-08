@@ -145,7 +145,7 @@ Kaycie approved the design but nothing is built. Today, `LLM_BACKEND=openrouter`
 1. Five-day cadence vs. power dialing.
 2. A larger rolling eligible pool.
 3. Geographic filtering.
-4. Probate and obituary sourcing layered into P1. **Changed 2026-11-07 (Kaycie): follow Ty's process.** Probate/obituary records go to deep prospecting (heirs or the PR found and made the owner, then their numbers worked), never straight to calling. `weekly_topup.skip_reason()` now holds back `Obituary`, `Probate`, `Pre-Probate/Deceased` and `Obit *` tags, so the top-up and P1 enrich skip them. The deep-prospecting track itself is not built yet.
+4. Probate and obituary sourcing layered into P1. **Changed 2026-11-07 (Kaycie): follow Ty's process.** Probate/obituary records go to deep prospecting (heirs or the PR found and made the owner, then their numbers worked), never straight to calling. `weekly_topup.skip_reason()` now holds back `Obituary`, `Probate`, `Pre-Probate/Deceased` and `Obit *` tags, so the top-up and P1 enrich skip them. Pilot heir cases written back 2026-11-07; weekly job `src/obituary_dp.py` built (plan-only until `OBIT_DP_LIVE`), output gated by `DP Review`.
 5. Phone quality and enrichment.
 6. Smarter Contact.
 7. Centralized owner-level eligibility (one gate for every outreach path).
@@ -212,3 +212,4 @@ Kaycie approved the design but nothing is built. Today, `LLM_BACKEND=openrouter`
   - db's `last_run.json` and `seen_ids.json` were restored after its dry run.
   - Nothing committed, pushed, toggled or written to DataSift.
 - 2026-11-07 (evening) — Synced local main to origin/main (backup branch `backup/local-edits-2026-11-07`), pushed 5 commits through 27213ad, Trestle header fix a48a466, P1 enrich backlog live (115 owners, 89 dialable, ~$9.18). Ported the probate/obituary deep-prospecting gate into `weekly_topup.skip_reason()` and these doc edits. Weekly top-up moving to Friday 6 PM CT after the Sun 11-08 run.
+- 2026-11-07 (late) — Wrote the 3 pilot heir cases to DataSift (phones + message-board notes: Monroe, Hosking, Thomas). Built `src/obituary_dp.py` + `src/smartskip.py` (18 tests, suite 606 passing), `DP Review` text block in `pm_text_sender`, Friday workflow step (plan-only) and the missing `pip install` in `weekly-topup.yml` (P1 enrich would have failed on `import requests`). Plan run: 7 eligible, 6 overlap the pilot. Needs: GitHub secrets `ANTHROPIC_API_KEY`, `SMARTSKIP_EMAIL`, `SMARTSKIP_PASSWORD`; Kaycie's go for `OBIT_DP_LIVE`. Not committed.

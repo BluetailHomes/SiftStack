@@ -32,6 +32,12 @@ name: Weekly Top-up
 # repo variable P1_ENRICH_LIVE is "true"; continue-on-error, so it never blocks
 # the top-up.
 #
+# After validation, src/obituary_dp.py deep prospects new Jackson obituary
+# records (Claude screen -> SmartSkip heirs -> Trestle) and writes heir phones +
+# a message-board note tagged "DP Review" for Kaycie. Plan-only (free, no writes)
+# unless the repo variable OBIT_DP_LIVE is "true"; continue-on-error, last, so it
+# never delays or blocks the top-up.
+#
 # On a Friday it first runs the drip check (src/drip_exit_guard.py --friday):
 # classifies every P1 morning-text drip (completed / delayed / weekend-bound /
 # later-weekday / failed) and posts the report. It removes weekend-bound drips
@@ -65,6 +71,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - run: pip install requests anthropic python-dotenv
       - name: Friday drip check (removes weekend-bound drips only if FRIDAY_DRIP_STOP_LIVE is "true")
         continue-on-error: true
         timeout-minutes: 10
@@ -119,6 +126,26 @@ jobs:
           ARGS="validate --slack"
           if [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 18:00-20:00"; fi
           python src/weekly_topup.py $ARGS || echo "::warning::Monday's batch did not validate; am-start will launch nothing"
+      - name: Obituary deep prospecting (plan only unless OBIT_DP_LIVE is "true")
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SMARTSKIP_EMAIL: ${{ secrets.SMARTSKIP_EMAIL }}
+          SMARTSKIP_PASSWORD: ${{ secrets.SMARTSKIP_PASSWORD }}
+          TRESTLE_API_KEY: ${{ secrets.TRESTLE_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          LIVE: ${{ vars.OBIT_DP_LIVE }}
+        run: |
+          if [ "${{ inputs.gate }}" = "true" ] && [ "$(python -c "import sys; sys.path.insert(0, 'src'); from pm_text_sender import _in_window; print(_in_window('18:00-20:00'))")" != "True" ]; then
+            echo "Outside 18:00-20:00 Central; skipping obituary DP"; exit 0
+          fi
+          ARGS="--slack"
+          if [ "$LIVE" = "true" ]; then ARGS="$ARGS --live"; fi
+          echo "python src/obituary_dp.py $ARGS"
+          python src/obituary_dp.py $ARGS
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -130,4 +157,6 @@ jobs:
             output/account_backups/topup_write_*
             output/pm_texts/p1_enrich_plan_*
             output/account_backups/p1_enrich_write_*
+            output/pm_texts/obit_dp_*
+            output/account_backups/obit_dp_write_*
           if-no-files-found: ignore

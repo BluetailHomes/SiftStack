@@ -76,8 +76,22 @@ Why it's worth doing: owner-skipped obituary and probate records reach about 5�
 | Extra skip provider | DirectSkip (Tyler) | Tracerfy gap-fill only | Optional; v5 measured SmartSkip at 89% hit, 93% of relatives with phones |
 | Selection preset | Obituary flag, 3+ mo, equity/sold exclusions, optional no-probate | Obituary track planned as plain tagged records, never loaded | Build the preset |
 | Probate owner swap | Edit Owners UI → API | `datasift-owner-phone-write-api` writes phones only; no owner-swap endpoint confirmed | Manual until the public API ships, or test the internal endpoint |
-| Write-back | Status + tag + phone tags + message board + PDF + custom fields | Phone write and tags proven (P1 enrichment); message board/file upload not yet confirmed via API | Confirm the board and file endpoints |
-| In-repo code | — | `src/deep_prospector.py` is a stub (`_run_level_1` "would call tracerfy here"); `src/obituary_enricher.py` has Haiku pick heirs from prose, which v5 replaced | Wrap v5 rather than extend these |
-| Scheduler | Fly.io daily + Slack | GitHub Actions via the Cloudflare dispatcher (5 cron slots used) | Reuse an existing trigger or run weekly |
+| Write-back | Status + tag + phone tags + message board + PDF + custom fields | Phone write, tags and message board proven (`POST /api/internal/property/{uuid}/message/` `{"message": ...}`, used on the 3 pilot heir records 2026-11-07); file upload unconfirmed | PDF/file upload |
+| In-repo code | — | `src/obituary_dp.py` + `src/smartskip.py` (2026-11-07): v5's SmartSkip → Trestle path plus a Claude obituary screen, run weekly; `deep_prospector.py`/`obituary_enricher.py` are legacy | No probate PR swap, no Tracerfy gap-fill, no PDF |
+| Scheduler | Fly.io daily + Slack | Last step of the Friday 6 PM CT weekly-topup run (no new cron slot); plan-only unless `OBIT_DP_LIVE` is "true" | Weekly, not daily |
 | Heir opener | Property-first, never ask for the deceased | Rahaf's script is built for P1 owners | Needs an heir opener |
 | Mail | Handwritten monthly for 12 months | No mail vendor (two-lane Phase 3 open) | Open |
+
+## Automated job: `src/obituary_dp.py` (built 2026-11-07, not live)
+
+Runs as the last step of `weekly-topup.yml` (Fridays 6 PM CT), `continue-on-error`. Plan-only (read-only, free) unless the repo variable `OBIT_DP_LIVE` is `"true"`.
+
+1. **Select:** Jackson records tagged `Obit 3-6mo` / `Obit 6mo+`, obituary 90+ days old, not tagged `DP Researched` / `Deep Prospecting` / `DP Review` / suppress tags, status not dead/lead/closed. Freshest first, max 10 per run.
+2. **Screen (Claude Opus 5.5 + web search):** is the *owner* the person who died? Living owners get a "OWNER IS LIVING, do not ask for the deceased" note; survivor names from the obituary are kept for heir matching. A future or 3+-year-old date of death is treated as not found.
+3. **SmartSkip** (deceased owners only, ~$0.15/row, bills the saved card) → relatives with phones, matched against the obituary's survivors. With no survivor list, close relatives are listed "(unconfirmed)".
+4. **Trestle** scores heir mobiles + the decedent's own lines; Drop, litigator and unscored numbers are not written.
+5. **Write:** phones merged onto the owner (tags `Dial First`… + `DP Heir` / `DP Owner Line` + `SmartSkip`, readback checked), one message-board note headed **PENDING REVIEW** with call order by last 4 digits, then tags `DP Researched` + `DP Review`. A paid SmartSkip order that fails still tags its records `DP Researched` so they are never paid for twice.
+
+**Review gate (2–3 weeks):** `DP Review` blocks every automated text (`pm_text_sender.outreach_block`). Kaycie reads the note; to release, swap `DP Review` → `Deep Prospecting` (enters the `04. DP Heirs - Ready to Call` ladder) or just remove `DP Review` for living owners. Max cost per run ≈ $9 (screen ~$0.50 × 10, SmartSkip $1.50, Trestle $2.40); this week's 7 eligible ≈ $7. Logs: `output/pm_texts/obit_dp_plan_*.json`, `obit_dp_pack_*.json`, `output/account_backups/obit_dp_write_*.json` (also uploaded as workflow artifacts).
+
+**First plan run (2026-11-07):** 97 Obituary records → 7 eligible; 6 of those were already screened in the pilot as living owners (Brandt 801 E 54th, Mckinnon 3418 Hanthorn, Allison 7645 Jarboe, Carter 9911 Lawndale, Fields 8710 Elm, Hubbard 3725 Valentine). Tag pilot records `DP Researched` before the first live run so they are not re-paid.
