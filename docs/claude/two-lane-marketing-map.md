@@ -60,7 +60,7 @@ Proposed new tags (not created):
 
 | Preset | Filter |
 |---|---|
-| **B0 Bulk – Eligible** | Has (`P1 Hold – Post-Sequence`, or only `Dial Third`/`Dial Fourth` phones, or a second-wave rung not scheduled for the blitz). Status is empty or `prospecting` (no lead/dead status). Has no `Bulk *`, `STOP – Review`, `Text Only`, or `Mail Only` tag. Has at least one mobile not marked Wrong/Dead/DNC. A held record keeps its old `Batch *` / `SMS Line *` tags (KPI history), so those tags do **not** exclude it; a never-blitzed record still needs no `Batch *` tag. |
+| **B0 Bulk – Eligible** | Has (`P1 Hold – Post-Sequence`, or only `Dial Third`/`Dial Fourth` phones, or a second-wave rung not scheduled for the blitz). Status is empty or `prospecting` (no lead/dead status). Has no `Bulk *`, `STOP – Review`, `Text Only`, or `Mail Only` tag. Has at least one mobile not marked Wrong/Dead/DNC and not tagged `Drop` (Trestle activity 0–20); the bulk text goes only to those mobiles. A held record keeps its old `Batch *` / `SMS Line *` tags (KPI history), so those tags do **not** exclude it; a never-blitzed record still needs no `Batch *` tag. |
 | **B1 Awaiting Reply** | `Bulk SMS` tag dated 1–5 days ago, and no `Bulk Reply` |
 | **B2 Power Dial** | Has `Bulk Dial`, has `predictivecall_attempts` < 3, and no `Bulk Reply` |
 | **B3 Mail / Deep** | Has `Bulk Mail`, or has `Bulk Dial` with 3+ attempts and no contact, or has no usable phone |
