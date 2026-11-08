@@ -85,6 +85,9 @@ DEFAULT_TARGET = 150                 # 14 per line on Lines A-K (approved 2026-1
 LINES = tuple("ABCDEFGHIJK")       # even round-robin (F-K added 2026-11-06; D/E ran a light 8-each first week on 10/26)
 LINE_CAP = 14                        # new records per SMS line per Monday = am-start's line_capacity() at 30 texts/line
 MAIL_ONLY_TAG = "Mail Only"
+# Ty, Oct 13 workshop [01:49:57]: every probate/obituary record goes to deep prospecting, never
+# straight to calling (5% contact on the decedent's numbers vs 60-70% once heirs are found).
+DECEASED_TAGS = ("Obituary", "Probate", "Pre-Probate/Deceased")
 TAG_CHUNK = 50
 BACKUP_DIR = STATE_DIR.parent / "account_backups"
 MIN_EQUITY = 30.0                    # known equity below this is suppressed; unknown equity is kept
@@ -215,6 +218,8 @@ def skip_reason(d: dict) -> str | None:
         return "has status"
     if "Mail Only" in tags:
         return "already Mail Only"
+    if any(t in DECEASED_TAGS or t.startswith("Obit ") for t in tags):
+        return "probate/obituary (deep prospecting)"
     if any(t.startswith("Batch ") or t.startswith("SMS Line") for t in tags):
         return "batch/line tag"
     if o.get("type") != "person":

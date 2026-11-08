@@ -455,6 +455,17 @@ def test_load_capacity_counts_running_drips_per_line():
     assert cap["SMS Line A"]["capacity"] == 14
 
 
+# ------------------------------------------------------------ probate/obituary go to deep prospecting
+
+def test_deceased_flags_stay_out_of_calling_batches():
+    """Ty, Oct 13 workshop: probate/obituary records are deep prospected, not called (2026-11-07)."""
+    for tag in ("Obituary", "Probate", "Pre-Probate/Deceased", "Obit 3-6mo"):
+        d = dict(_det(tags=(tag,)), assigned_to=None, status=None)
+        assert wt.skip_reason(d) == "probate/obituary (deep prospecting)"
+    # An heir already owns an inherited house, so it stays callable.
+    assert wt.skip_reason(dict(_det(tags=("Inherited",)), assigned_to=None, status=None)) != "probate/obituary (deep prospecting)"
+
+
 # ------------------------------------------------------------ finished drips stay out of new batches
 
 def test_finished_drip_records_stay_ineligible(tmp_path):
