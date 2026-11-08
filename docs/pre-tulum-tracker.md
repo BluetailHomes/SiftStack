@@ -211,3 +211,4 @@ Kaycie approved the design but nothing is built. Today, `LLM_BACKEND=openrouter`
   - GitHub token gives 401; Trestle key gives 403.
   - db's `last_run.json` and `seen_ids.json` were restored after its dry run.
   - Nothing committed, pushed, toggled or written to DataSift.
+- 2026-11-07 (evening) — Synced local main to origin/main (backup branch `backup/local-edits-2026-11-07`), pushed 5 commits through 27213ad, Trestle header fix a48a466, P1 enrich backlog live (115 owners, 89 dialable, ~$9.18). Ported the probate/obituary deep-prospecting gate into `weekly_topup.skip_reason()` and these doc edits. Weekly top-up moving to Friday 6 PM CT after the Sun 11-08 run.

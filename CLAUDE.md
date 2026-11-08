@@ -115,5 +115,7 @@ Moved verbatim from this file on 2026-10-27. Read the relevant one before changi
 | `high-potential-filter.md` | Step 8b ZIP + equity gates, thresholds, suppressed-leads log, tags, opt-out flags |
 | `courthouse-photo-pipeline.md` | Photo/Dropbox import, OCR patterns, Knox probate deep prospecting |
 | `wholesale-offer.md` | Wholesale offer layer on Ty's analyzer: case.json, draft packet, risk-acknowledged approval, final PDF, live-use blockers |
+| `deep-prospecting-ty-sop.md` | Ty/Tyler's obituary + probate deep-prospecting SOP (Oct 13–29 workshop) vs our deep-prospecting-v5 tooling; gaps and open decisions |
 | `skill-library.md` | DataSift's 27-skill plugin library, `bluetail-*` skills, historical notes |
+| `two-lane-marketing-map.md` | PAPER DESIGN (2026-11-07): Lane A blitz + Lane B bulk SMS → power dialer → mail; proposed Bulk tags/presets, code touch points, open decisions |
 | `../OK_KS_SCRAPER_FEASIBILITY.md`, `../sms_reply_rules.md` | Pre-existing docs |
