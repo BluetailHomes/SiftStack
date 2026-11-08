@@ -334,6 +334,8 @@ def test_outreach_and_enroll_blocks():
     aram = _det(owner={"uuid": ARAM})
     assert "Aram" in pts.outreach_block(aram) and "Aram" in pts.enroll_block(aram)
     assert pts.enroll_block(_det(tags=(BATCH, "SMS Line A", "Text Only"))) is None   # dialer rule, not a text block
+    dp = _det(tags=("Obituary", "Deep Prospecting"))
+    assert "Deep Prospecting" in pts.outreach_block(dp) and "Deep Prospecting" in pts.enroll_block(dp)
 
 
 def test_gates_refuse_excluded_records():

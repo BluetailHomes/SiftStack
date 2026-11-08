@@ -81,6 +81,7 @@ BAD_MARKS = {"WRONG", "DEAD", "DNC", "CORRECT_DNC", "WRONG_DNC"}                
 # rule: keep those records off SmrtDialer lists. It does not block texts.
 STOP_REVIEW_TAG = ("f06c1d11-3132-475a-bd60-6f276b0d7da3", "STOP – Review")             # no automated outreach at all
 POST_SEQ_HOLD_TAG = ("11989878-10e7-49a9-a697-a5bbf28f324d", "P1 Hold – Post-Sequence")  # no new enrollment
+DEEP_PROSPECTING_TAG = ("b9a0a1a5-06fb-45ef-ab30-123ee12650b2", "Deep Prospecting")       # heir phones; no automated texts
 # Owners who get no direct outreach from any automated path (owner uuid -> why).
 NO_DIRECT_OUTREACH = {
     "52f78fea-445b-4d1e-8a1f-27be5269b5ea": "Aram Damirjian: no direct outreach, realtor contact handled separately (Kaycie, 2026-10-27)",
@@ -333,6 +334,10 @@ def outreach_block(det: dict) -> str | None:
     keys = {_tag_key(t) for t in det.get("tags") or []}
     if _tag_key(STOP_REVIEW_TAG[1]) in keys:
         return f"tagged {STOP_REVIEW_TAG[1]!r} (P1 is reviewing a STOP)"
+    # The owner on a deep-prospected record is the decedent and its phones are mostly heirs',
+    # so a "Hey {first}" text would greet the son by his late mother's name. Rahaf texts by hand.
+    if _tag_key(DEEP_PROSPECTING_TAG[1]) in keys:
+        return f"tagged {DEEP_PROSPECTING_TAG[1]!r} (heir phones on a deceased owner)"
     return NO_DIRECT_OUTREACH.get((det.get("owner") or {}).get("uuid"))
 
 
