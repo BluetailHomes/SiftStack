@@ -552,3 +552,19 @@ def test_plan_takes_lowest_doors_per_deal_rung_first():
         p = wt.plan(api, 1)
     assert [r["uuid"] for r in p["eligible"]] == ["new"]
     assert p["rungs_added"] == [wt.RUNGS[0]] and p["rungs_added_uuids"] == ["L0"]
+
+
+def test_pm_text_cap_goes_to_blitz_before_lane_b():
+    def model(i, tags):
+        n = f"81655502{i:02d}"
+        return {"uuid": f"u{i}", "street": f"{i} MAIN ST", "status": "prospecting", "owner_first": "JANE", "tags": list(tags),
+                "phones": {n: _phone(n)}, "stop": pts.stop_policy({}, {n: _phone(n)}, {}), "blocked": None,
+                "sms_out": [], "sms_in": [], "marks": [], "attempts": 1, "attempt_bumps": 1,
+                "calls": [{"by": "c", "dir": "outbound", "result": "answered", "to": n, "dur": 40,
+                           "ct": dt.datetime(2026, 11, 9, 14, 0)}]}
+    cap = pts.MAX_PER_LINE * len(pts.PM_LINES)
+    models = [model(i, (HOLD,)) for i in range(5)] + [model(i, (BATCH,)) for i in range(5, 5 + cap)]
+    with patch.object(pts, "final_mark", return_value="NO_ANSWER"):
+        to_send = pts.plan_pm_texts(models, "2026-11-09", "c", set())[0]
+    sent = {e["uuid"] for e in to_send if not e["overflow"]}
+    assert len(sent) == cap and not any(f"u{i}" in sent for i in range(5))

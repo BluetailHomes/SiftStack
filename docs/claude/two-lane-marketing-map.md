@@ -45,7 +45,7 @@ Rules for Lane B:
 
 Existing tags this design relies on: `Priority 1`, `Obituary`, `FTM`, `Batch YYYY-MM-DD`, `SMS Line A–E`, `Mail Only`, `Dial First`–`Dial Fourth`, and these two:
 - `P1 Hold – Post-Sequence` (`11989878-10e7-49a9-a697-a5bbf28f324d`). This is the main entry into Lane B.
-- `STOP – Review` (`f06c1d11-3132-475a-bd60-6f276b0d7da3`).
+- `STOP – Review` (`f06c1d11-3132-475a-bd60-6f276b0d7da3`). Used to keep finished-blitz records out of Lane B when they had a real conversation or a do-not-call note. 2026-11-07: added to Thomas Wrenn ×2 (Text Only), Curtis Allen, Donnie Landes, Gurmej Gosal, Betty Fore (backup `output/account_backups/stop_review_before_2026-11-07.json`).
 
 Proposed new tags (not created):
 
@@ -60,7 +60,7 @@ Proposed new tags (not created):
 
 | Preset | Filter |
 |---|---|
-| **B0 Bulk – Eligible** | Has (`P1 Hold – Post-Sequence`, or only `Dial Third`/`Dial Fourth` phones, or a second-wave rung not scheduled for the blitz). Has no status. Has no `Batch *`, `SMS Line *`, `Bulk *`, `STOP – Review`, or `Mail Only` tag. Has at least one mobile not marked Wrong/Dead/DNC. |
+| **B0 Bulk – Eligible** | Has (`P1 Hold – Post-Sequence`, or only `Dial Third`/`Dial Fourth` phones, or a second-wave rung not scheduled for the blitz). Status is empty or `prospecting` (no lead/dead status). Has no `Bulk *`, `STOP – Review`, `Text Only`, or `Mail Only` tag. Has at least one mobile not marked Wrong/Dead/DNC. A held record keeps its old `Batch *` / `SMS Line *` tags (KPI history), so those tags do **not** exclude it; a never-blitzed record still needs no `Batch *` tag. |
 | **B1 Awaiting Reply** | `Bulk SMS` tag dated 1–5 days ago, and no `Bulk Reply` |
 | **B2 Power Dial** | Has `Bulk Dial`, has `predictivecall_attempts` < 3, and no `Bulk Reply` |
 | **B3 Mail / Deep** | Has `Bulk Mail`, or has `Bulk Dial` with 3+ attempts and no contact, or has no usable phone |

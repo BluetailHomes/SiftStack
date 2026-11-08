@@ -488,6 +488,11 @@ def plan_pm_texts(models: list[dict], day: str, caller: str, already_sent: set[s
                 skipped.append({**entry, "why": why})
             else:
                 to_send.append(entry)
+    # Lane B (Post-Sequence) power-dial voicemails get a text too, but blitz records claim the
+    # line cap first so a big Lane B day never crowds out the new batch. Stable sort keeps call order.
+    hold = _tag_key(POST_SEQ_HOLD_TAG[1])
+    lane_b = {m["uuid"] for m in models if hold in {_tag_key(t) for t in m.get("tags") or []}}
+    to_send.sort(key=lambda e: e["uuid"] in lane_b)
     # line rotation + per-line cap. The cap counts texts already sent from each line earlier
     # today (a retry after a partial run), so a line never goes past MAX_PER_LINE in a day.
     counts, i = Counter(prior_line_counts or {}), 0
