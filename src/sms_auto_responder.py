@@ -116,7 +116,21 @@ class DataSift:
         return self.get(f"/property/{uuid}/logs/").get("data", [])
 
     def messages(self, uuid: str) -> list[dict]:
-        return self.get(f"/property/{uuid}/message/").get("results", [])
+        """Every message-board note on the record, all pages. Raises on a failed read: the
+        handled-check must fail closed. Reading only page 1, or treating an error as an empty
+        board, made the responder re-handle the same texts every poll (2026-11-11: 250+ duplicate
+        drafts on 525 E 3rd St in 3 hours)."""
+        out, offset = [], 0
+        while True:
+            r = self._req("GET", f"{BASE}/property/{uuid}/message/", params={"limit": 100, "offset": offset})
+            if r.status_code != 200:
+                raise RuntimeError(f"message board read failed ({r.status_code}) for {uuid}")
+            d = r.json()
+            page = d.get("results") or []
+            out += page
+            if not d.get("next") or not page:
+                return out
+            offset += len(page)
 
     def post_message(self, uuid: str, text: str) -> bool:
         return self._req("POST", f"{BASE}/property/{uuid}/message/", json={"message": text}).status_code in (200, 201)
@@ -459,9 +473,28 @@ def handle(ds: DataSift, rules: str, ev: dict, mode: str, dry_run: bool, model: 
         "thread": thread, "inbound_number": inbound_number, "inbound_text": sms.get("message") or "",
     }
     result.update(property=pu, street=d["address"].get("street"), status=st)
-    handled, today_any = (False, False) if dry_run else already_handled(ds, pu, sms.get("uuid", ""))
+    try:
+        handled, today_any = (False, False) if dry_run else already_handled(ds, pu, sms.get("uuid", ""))
+    except RuntimeError as e:
+        log.warning("%s; skipping this text until the next poll", e)
+        result["why"] = "message board unreadable"
+        return result
     if handled:
         result["why"] = "already handled"
+        return result
+    marker = f"[auto-reply {sms.get('uuid', '')[:8]}]"
+    if not (sms.get("message") or "").strip():
+        # A photo (MMS) reaches DataSift as an inbound text with no body; the image itself only
+        # lives in smrtPhone. Nothing to classify: leave one short marker so it is handled once,
+        # and ping Slack only for the first photo note on this record today.
+        result.update(action="photo", why="empty inbound (photo/MMS)")
+        if dry_run:
+            return result
+        ds.post_message(pu, f"{marker} PHOTO — owner sent a photo/MMS from {inbound_number}. "
+                            "Open the conversation in smrtPhone to see it (photos don't show in DataSift).")
+        if not today_any:
+            slack(f"*Photo received* {d['address'].get('street')} from {inbound_number}. View it in smrtPhone.\n"
+                  f"https://app.reisift.io/records/properties/{pu}/details")
         return result
     out = classify(rules, ctx, model)
     if not out:
@@ -475,7 +508,6 @@ def handle(ds: DataSift, rules: str, ev: dict, mode: str, dry_run: bool, model: 
     result.update(classification=out, action="draft" if mode == "draft" else "auto")
     if dry_run:
         return result
-    marker = f"[auto-reply {sms.get('uuid', '')[:8]}]"
     note = (f"{marker} DRAFT — {out['category']} (confidence {out.get('confidence', 0):.2f})"
             f"{' — NEEDS A HUMAN' if out.get('needs_human') else ''}\n"
             f"Owner texted from {inbound_number}: {ctx['inbound_text']!r}\n"
