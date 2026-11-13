@@ -92,7 +92,7 @@ TAG_CHUNK = 50
 BACKUP_DIR = STATE_DIR.parent / "account_backups"
 MIN_EQUITY = 30.0                    # known equity below this is suppressed; unknown equity is kept
 RECENT_SOLD_DAYS = 365               # a sale this recent means the owner on file may be stale
-SUPPRESS_TAGS = ("Do Not Market", "ZZ STOP GO", "Entity Owner", "Entity Classification Hold", "Sold", "Negative Equity")
+SUPPRESS_TAGS = ("Do Not Market", "ZZ STOP GO", "Entity Owner", "Entity Classification Hold", "Sold", "recently sold", "Negative Equity")
 # Statuses on ANY of the owner's properties that keep the owner out of a new batch.
 DECLINE_STATUSES = ("not_interested", "Dead Lead", "lost_deal")
 ACTIVE_STATUSES = ("new_lead", "No Contact New Lead", "Cold Lead", "Warm Lead", "Hot Lead", "Ghosting Lead",
