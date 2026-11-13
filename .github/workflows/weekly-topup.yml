@@ -126,6 +126,19 @@ jobs:
           ARGS="validate --slack"
           if [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 18:00-20:00"; fi
           python src/weekly_topup.py $ARGS || echo "::warning::Monday's batch did not validate; am-start will launch nothing"
+      - name: Obit age tags (plan only unless OBIT_AGE_LIVE is "true")
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          LIVE: ${{ vars.OBIT_AGE_LIVE }}
+        run: |
+          ARGS="--slack"
+          if [ "$LIVE" = "true" ]; then ARGS="$ARGS --live"; fi
+          echo "python src/obit_age_tags.py $ARGS"
+          python src/obit_age_tags.py $ARGS
       - name: Obituary deep prospecting (plan only unless OBIT_DP_LIVE is "true")
         if: ${{ !cancelled() }}
         continue-on-error: true
@@ -159,4 +172,6 @@ jobs:
             output/account_backups/p1_enrich_write_*
             output/pm_texts/obit_dp_*
             output/account_backups/obit_dp_write_*
+            output/pm_texts/obit_age_tags_plan_*
+            output/account_backups/obit_age_tags_*
           if-no-files-found: ignore
