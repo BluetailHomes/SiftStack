@@ -98,8 +98,22 @@ def owner_name(d: dict) -> str:
 
 
 # ----------------------------------------------------------------- select
-def eligible(d: dict, today: dt.date, county: str = "Jackson", state: str = "MO") -> str | None:
-    """Why this property detail can't be researched this run, or None."""
+def closed_out_on(api: Sift, uuid: str) -> dt.date | None:
+    """Date the record last moved to close_out, from its activity log, or None if not found."""
+    try:
+        evs = (api.call(f"/api/internal/property/{uuid}/logs/?limit=250&offset=0") or {}).get("results") or []
+    except RuntimeError:
+        return None
+    days = [_date(e.get("timestamp")) for e in evs if e.get("event_type") == "property.status.updated"
+            and ((((e.get("payload") or {}).get("property") or {}).get("status") or [None])[-1] == "close_out")]
+    return max((x for x in days if x), default=None)
+
+
+def eligible(d: dict, today: dt.date, county: str = "Jackson", state: str = "MO",
+             closed_on: dt.date | None = None) -> str | None:
+    """Why this property detail can't be researched this run, or None.
+    A close_out record (worked and closed earlier) is only researched when its obituary is dated
+    after the close-out, i.e. someone died after we stopped working it. `closed_on` is that date."""
     keys = {_tag_key(t) for t in d.get("tags") or []}
     for t in (RESEARCHED_TAG, DP_REVIEW_TAG[1], DEEP_PROSPECTING_TAG[1]):
         if _tag_key(t) in keys:
@@ -114,7 +128,11 @@ def eligible(d: dict, today: dt.date, county: str = "Jackson", state: str = "MO"
     if (o.get("type") or "person").lower() not in ("person", "individual") or not (o.get("first_name") or "").strip():
         return "not a person"
     status = str(d.get("status") or "")
-    if status in ACTIVE_STATUSES or status in DECLINE_STATUSES or re.search(r"lead|contract|closed|sold", status, re.I):
+    if status == "close_out":
+        od = _date(d.get("last_obituary_date"))
+        if not (closed_on and od and od > closed_on):
+            return f"status close_out (closed {closed_on or 'date unknown'}, obituary {od or 'none'})"
+    elif status in ACTIVE_STATUSES or status in DECLINE_STATUSES or re.search(r"lead|contract|closed|sold", status, re.I):
         return f"status {status}"
     if d.get("assigned_to"):
         return "assigned"
@@ -136,7 +154,8 @@ def plan(api: Sift, county: str, today: dt.date) -> dict:
     picks, counts = [], Counter()
     for row in api.search(must):
         d = api.call(f"/api/internal/property/{row['uuid']}/")
-        why = eligible(d, today, county)
+        closed_on = closed_out_on(api, d["uuid"]) if d.get("status") == "close_out" else None
+        why = eligible(d, today, county, closed_on=closed_on)
         counts[why.split(" ")[0] if why else "eligible"] += 1
         if not why:
             picks.append(d)

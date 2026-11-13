@@ -35,6 +35,32 @@ def test_eligible_keeps_a_clean_jackson_record_and_a_deceased_owner():
     assert od.eligible(dead, TODAY) is None          # the heir case is the point, not a suppression
 
 
+def test_eligible_close_out_only_when_obituary_is_newer():
+    rec = _d(status="close_out", last_obituary_date="2026-05-01")
+    assert od.eligible(rec, TODAY, closed_on=dt.date(2026, 3, 1)) is None              # died after we closed it
+    assert od.eligible(rec, TODAY, closed_on=dt.date(2026, 8, 15)).startswith("status close_out")  # obit predates close-out
+    assert od.eligible(rec, TODAY, closed_on=dt.date(2026, 5, 1)).startswith("status close_out")   # same day: not newer
+    assert "date unknown" in od.eligible(rec, TODAY)                                   # no close-out date: skip
+    assert od.eligible(_d(status="close_out", last_obituary_date=None), TODAY, closed_on=dt.date(2026, 3, 1)).startswith("status close_out")
+
+
+def test_closed_out_on_reads_latest_close_out_from_logs():
+    class Api:
+        def call(self, path):
+            assert path.startswith("/api/internal/property/p1/logs/")
+            return {"results": [
+                {"event_type": "property.status.updated", "timestamp": "2026-06-02T15:00:00Z", "payload": {"property": {"status": [None, "close_out"]}}},
+                {"event_type": "property.status.updated", "timestamp": "2026-07-01T15:00:00Z", "payload": {"property": {"status": ["close_out", "prospecting"]}}},
+                {"event_type": "property.status.updated", "timestamp": "2026-09-10T15:00:00Z", "payload": {"property": {"status": ["prospecting", "close_out"]}}},
+                {"event_type": "owner.call.made", "timestamp": "2026-09-20T15:00:00Z", "payload": {}}]}
+    assert od.closed_out_on(Api(), "p1") == dt.date(2026, 9, 10)
+
+    class Broken:
+        def call(self, path):
+            raise RuntimeError("500")
+    assert od.closed_out_on(Broken(), "p1") is None
+
+
 def test_eligible_refusals():
     assert "DP Review" in od.eligible(_d(tags=["Obit 6mo+", "DP Review"]), TODAY)
     assert "DP Researched" in od.eligible(_d(tags=["Obit 6mo+", "dp researched"]), TODAY)
