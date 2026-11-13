@@ -273,6 +273,24 @@ async def run_saved_search(
         else:
             return []
 
+    # Confirmed live 2026-11-07: once the site subscription lapses, the dropdown's only
+    # option is "Subscription or free trial expired". The select then silently does
+    # nothing and the run used to report a false "0 notices".
+    options = await page.eval_on_selector_all(
+        f"{SEL_SAVED_SEARCHES_DROPDOWN} option", "els => els.map(e => e.textContent.trim())",
+    )
+    if search.saved_search_name not in options:
+        if any("expired" in o.lower() for o in options):
+            logger.error(
+                "Notice-site subscription EXPIRED (%s) — cannot run '%s'. Renew it; this is not a real zero.",
+                page.url.split("/")[2], search.saved_search_name,
+            )
+        else:
+            logger.error(
+                "Saved search '%s' not in dropdown (options: %s)", search.saved_search_name, options,
+            )
+        return []
+
     # Selecting from the dropdown triggers an ASP.NET postback → full page navigation.
     # Must wait for navigation explicitly or the execution context gets destroyed.
     # expect_navigation() is the primary path (proven live on mopublicnotices.com) —

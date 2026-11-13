@@ -32,3 +32,22 @@ Actor Input equivalents: `include_off_target`, `include_low_equity` (both boolea
 **Update 2026-08-09 — investigated and partially closed.** MO did need its own property-address lookup tier: a real scheduled run showed `Probate with address: 0/6`, confirming the gap (see "MO Property-Address Lookup Tier" below). `src/mo_parcel_lookup.py` now covers Clay County (8 of MO's 38 target zips) the same way `nm_parcel_lookup.py` covers NM. Jackson, Platte, and Cass are still unresolved ZIP gates today — see that section for why (Jackson's public GIS layers lack owner data; Platte/Cass need browser automation, not a clean REST query) — so MO's ZIP targeting is now partially, not fully, at parity with NM's/Knox's, and the "pass through unfiltered rather than guess" behavior still applies to those 3 counties' probate leads.
 
 Tests: `tests/test_high_potential_filter.py` (33 tests — `_years_since_sale`, `_classify_equity_signal` across all 5 signal branches, `_filter_high_potential` including the suppressed-leads QA log and the zip-without-confirmed-address regression case, and the `config.py` constants).
+
+## Step 8c — Target-neighborhood gate (added 2026-11-07)
+
+**Why:** the old probate runs produced "leads" in areas with no investor activity. Probates now stay inside the same 25 SiftMap neighborhoods as the Jackson P1 presets and `obituary_dp` — `config.TARGET_NEIGHBORHOODS` (moved there from `obituary_dp.P1_NEIGHBORHOODS`, which now points at it).
+
+**How:** `enrichment_pipeline._filter_target_neighborhoods()`, after Step 8b and before Step 9 (Obituary). For each record in a county with a list (Jackson only today) it looks up the property's SiftMap neighborhood via `src/siftmap_lookup.py` (`map.reisift.io` autocomplete + detail, `REISIFT_API_KEY`, read-only, undocumented endpoints). A match must be in the county and share the house number. If the first query misses, it retries once with the street type dropped.
+
+| Result | What happens | Tag |
+|---|---|---|
+| Neighborhood in the list | kept | `p1_neighborhood` |
+| Neighborhood found, not in the list | suppressed to `output/suppressed_leads.csv`, reason `outside_target_neighborhoods:<name>` | — |
+| No property address, no SiftMap match, lookup error, no API key | **kept, held** (never drop on missing data) | `nbhd_unplaced` |
+| `--include-off-target` run, outside the list | kept | `nbhd_outside` |
+
+**Replaces the ZIP drop for listed counties.** The Jackson `TARGET_ZIPS` (64128/30/32/33/34/38) miss every Independence P1 neighborhood, so Step 8b skips its ZIP drop for counties in `TARGET_NEIGHBORHOODS`. `zip_tier` is still tagged. Opt-outs: `--include-off-target` turns off the drops in both 8b and 8c (tags are still written); `PipelineOptions.skip_neighborhood_filter` skips 8c entirely and restores the Jackson ZIP drop.
+
+**Jackson address tier (Step 3c).** Jackson has no public owner-searchable parcel data, but SiftMap keeps a deceased owner as owner of record. `siftmap_lookup.probate_property_lookup_siftmap()` searches the decedent name (full, then First Last, then Last First for trusts) and fills the address only when there is exactly one Jackson property whose owner carries the decedent's surname. It always overwrites `zip`, so a parser-fallback ZIP (often the PR's) can't ride along. The record gets the tag `addr_from_owner_name`, and the address still goes through Smarty and Zillow.
+
+Tests: `tests/test_neighborhood_gate.py` (20). The 2026-11-07 live smoke test placed 7/7 known addresses correctly.

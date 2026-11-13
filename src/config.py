@@ -668,6 +668,27 @@ TARGET_ZIPS: dict[str, str] = {
     "87124": "Tier 1", "87144": "Tier 1",
 }
 
+# Target neighborhoods (2026-11-07): the 25 SiftMap neighborhoods on every
+# "Jackson - Priority 1" preset. Probate/obituary leads stay inside them, like
+# P1 — Step 8c (enrichment_pipeline._filter_target_neighborhoods) and
+# obituary_dp.eligible() both read this. Names are lowercase, without the
+# ", MO" suffix SiftMap sometimes adds (see siftmap_lookup.norm_hood).
+#
+# For a county listed here the neighborhood gate REPLACES the Step 8b ZIP
+# drop: the Jackson ZIPs above miss every Independence P1 neighborhood
+# (Three Trails, Bristol, Rockwood, Maywood, Benton are all 6405x), so the
+# ZIP gate would throw away good leads before Step 8c ever saw them.
+TARGET_NEIGHBORHOODS: dict[str, frozenset[str]] = {
+    "Jackson": frozenset(n.lower() for n in (
+        "Vineyard - Kansas City", "East Meyer 6", "Bristol - Independence", "Ruskin Heights",
+        "Rockwood - Independence", "Swope Park Campus", "South Town Fork Creek", "Oak Park Southwest",
+        "Noble And Gregory Ridge", "Blue Hills - Kansas City", "Marlborough Heights Marlborough Pride",
+        "Fairwood And Robandee", "North Town Fork Creek", "Vineyard Northwest", "Ruskin Hills",
+        "Maywood - Independence", "Fairlane - Kansas City", "Three Trails", "Robandee South",
+        "Ivanhoe Southwest", "Hickman Mills", "Cunningham Ridge", "Ivanhoe Southeast", "Wendell Phillips",
+        "Benton - Independence")),
+}
+
 # Equity gate — revised 2026-08-09 after a second review pass (Kaycie ran
 # the v1 30%-hard-cutoff design past a separate advisory chat). That
 # review's core objection: a single hard cutoff risks throwing away a

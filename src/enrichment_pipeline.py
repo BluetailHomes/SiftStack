@@ -13,6 +13,7 @@ and all enrichment steps in a fixed canonical order.
 
 import csv
 import logging
+import os
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -47,6 +48,7 @@ class PipelineOptions:
     skip_high_potential_filter: bool = False  # true if EITHER sub-filter below is skipped — kept for back-compat / simple "skip entirely" callers
     skip_zip_filter: bool = False    # opt-out via --include-off-target
     skip_equity_filter: bool = False  # opt-out via --include-low-equity
+    skip_neighborhood_filter: bool = False  # Step 8c; --include-off-target (skip_zip_filter) also turns its drops off
 
     # High-Potential Lead Filter sub-options — None means "use config
     # defaults" (config.TARGET_ZIPS / config.HARD_DROP_EQUITY_PERCENT).
@@ -341,8 +343,12 @@ def _filter_high_potential(
     hard_drop_equity_percent: float,
     skip_zip_filter: bool = False,
     skip_equity_filter: bool = False,
+    zip_exempt_counties: frozenset[str] = frozenset(),
 ) -> list[NoticeData]:
     """Drop leads outside target ZIPs or with confirmed equity < 20%.
+
+    zip_exempt_counties (lowercase): counties whose ZIP drop is replaced by the
+    Step 8c neighborhood gate (config.TARGET_NEIGHBORHOODS). zip_tier is still set.
 
     Sets notice.zip_tier and notice.equity_signal on every surviving
     record (used for DataSift tagging — see datasift_formatter._build_tags)
@@ -407,7 +413,8 @@ def _filter_high_potential(
         has_property_address = bool(n.address.strip())
         if zip_clean and has_property_address:
             n.zip_tier = target_zips.get(zip_clean, "")
-            if not skip_zip_filter and zip_clean not in target_zips:
+            if (not skip_zip_filter and zip_clean not in target_zips
+                    and n.county.lower() not in zip_exempt_counties):
                 zip_dropped += 1
                 suppressed.append((n, "zip_out_of_target"))
                 continue
@@ -446,6 +453,83 @@ def _filter_high_potential(
             "kept, recommend human review before spending on them",
             low_equity_flagged, kept,
         )
+    return result
+
+
+def _filter_target_neighborhoods(
+    notices: list[NoticeData],
+    target_neighborhoods: dict[str, frozenset[str]],
+    drop: bool = True,
+    lookup=None,
+) -> list[NoticeData]:
+    """Step 8c: keep leads in counties with a neighborhood list inside that list.
+
+    Fixes the old probate runs' big miss — "leads" in areas with no investor
+    activity. Same 25 neighborhoods as the Jackson P1 presets and obituary_dp.
+
+    Per record in a listed county:
+      - neighborhood in the list           -> kept, neighborhood_status "in_target"
+      - neighborhood found, not in list    -> suppressed (QA log) when drop, else
+                                              kept as "outside_target"
+      - no property address, no SiftMap match, or lookup error
+                                           -> kept as "unplaced" (never drop on
+                                              missing data; tagged nbhd_unplaced
+                                              so it's held for review)
+    Counties without a list pass through untouched.
+
+    lookup(notice) -> SiftMap neighborhood name, or "" when not found. Defaults
+    to siftmap_lookup.SiftMap().lookup_address. If no REISIFT_API_KEY, every
+    record is unplaced rather than dropped.
+    """
+    targets = {c.lower(): hoods for c, hoods in target_neighborhoods.items()}
+    if not any(n.county.lower() in targets for n in notices):
+        return notices
+
+    from siftmap_lookup import norm_hood
+    if lookup is None:
+        try:
+            from siftmap_lookup import SiftMap
+            sm = SiftMap()
+
+            def lookup(n):
+                hit = sm.lookup_address(n.address, n.city, n.state or "MO", n.zip, county=n.county)
+                return hit["neighborhood"] if hit else ""
+        except RuntimeError as e:
+            logger.warning("  SiftMap unavailable (%s) — records held as unplaced, none dropped", e)
+            lookup = lambda n: ""  # noqa: E731
+
+    result, suppressed = [], []
+    counts = {"in_target": 0, "outside_target": 0, "unplaced": 0}
+    for n in notices:
+        hoods = targets.get(n.county.lower())
+        if hoods is None:
+            result.append(n)
+            continue
+        if not n.neighborhood and n.address.strip():
+            try:
+                n.neighborhood = lookup(n) or ""
+            except Exception as e:  # network/API change: hold, don't drop
+                logger.warning("  Neighborhood lookup failed for %s: %s", n.address, e)
+        hood = norm_hood(n.neighborhood)
+        if not hood:
+            n.neighborhood_status = "unplaced"
+        elif hood in hoods:
+            n.neighborhood_status = "in_target"
+        else:
+            n.neighborhood_status = "outside_target"
+            if drop:
+                counts["outside_target"] += 1
+                suppressed.append((n, f"outside_target_neighborhoods:{n.neighborhood}"))
+                continue
+        counts[n.neighborhood_status] += 1
+        result.append(n)
+
+    logger.info(
+        "  In target neighborhoods: %d | outside%s: %d | unplaced (kept, nbhd_unplaced): %d",
+        counts["in_target"], " (suppressed)" if drop else " (kept, tag only)",
+        counts["outside_target"], counts["unplaced"],
+    )
+    _write_suppressed_log(suppressed)
     return result
 
 
@@ -780,6 +864,30 @@ def run_enrichment_pipeline(
         except Exception as e:
             logger.warning("  MO probate property lookup failed: %s", e)
 
+    # Jackson County, MO — added 2026-11-07. No public owner-searchable
+    # parcel data (see mo_parcel_lookup.py), but SiftMap keeps a deceased
+    # owner as owner of record, so the decedent's name finds the house.
+    # Unique matches only — see siftmap_lookup.probate_property_lookup_siftmap.
+    probate_no_addr_jackson = [
+        n for n in notices
+        if n.notice_type == "probate"
+        and not n.address.strip()
+        and n.decedent_name.strip()
+        and n.county.lower() == "jackson"
+    ]
+    if probate_no_addr_jackson and os.getenv("REISIFT_API_KEY"):
+        logger.info(
+            "── Step 3c: Probate Property Lookup — Jackson via SiftMap (%d candidates) ──",
+            len(probate_no_addr_jackson),
+        )
+        try:
+            from siftmap_lookup import probate_property_lookup_siftmap
+            probate_property_lookup_siftmap(probate_no_addr_jackson)
+            found = sum(1 for n in probate_no_addr_jackson if n.address.strip())
+            logger.info("  Property address found: %d/%d", found, len(probate_no_addr_jackson))
+        except Exception as e:
+            logger.warning("  Jackson SiftMap property lookup failed: %s", e)
+
     # Kansas (Johnson County only — added 2026-09-14, same structural gap
     # as MO/NM, confirmed for KS by CLAUDE.md's Kansas validation-drop-
     # rate writeup: ~49% of scraped probate notices dropped for "missing
@@ -1023,6 +1131,10 @@ def run_enrichment_pipeline(
             ),
             skip_zip_filter=opts.skip_zip_filter,
             skip_equity_filter=opts.skip_equity_filter,
+            zip_exempt_counties=(
+                frozenset() if opts.skip_neighborhood_filter
+                else frozenset(c.lower() for c in config.TARGET_NEIGHBORHOODS)
+            ),
         )
         logger.info("  %d records after filter", len(notices))
         if not notices:
@@ -1030,6 +1142,22 @@ def run_enrichment_pipeline(
             return notices
     else:
         logger.info("── Step 8b: High-Potential Filter (skipped) ──")
+
+    # ── Step 8c: Target-Neighborhood Gate (SiftMap) ──────────────────
+    # After Smarty/Zillow (clean USPS addresses) and before Step 9
+    # (Obituary, the expensive step). See _filter_target_neighborhoods().
+    if not opts.skip_neighborhood_filter and not opts.skip_high_potential_filter:
+        logger.info("── Step 8c: Target-Neighborhood Gate ──")
+        drop = not opts.skip_zip_filter
+        if not drop:
+            logger.info("  Neighborhood drops disabled (--include-off-target) — tagging only")
+        notices = _filter_target_neighborhoods(notices, config.TARGET_NEIGHBORHOODS, drop=drop)
+        logger.info("  %d records after gate", len(notices))
+        if not notices:
+            logger.warning("No records remaining after filtering")
+            return notices
+    else:
+        logger.info("── Step 8c: Target-Neighborhood Gate (skipped) ──")
 
     # ── Step 9: Obituary Enrichment ──────────────────────────────────
     if not opts.skip_obituary and not opts.has_obituary:

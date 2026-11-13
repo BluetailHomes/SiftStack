@@ -139,6 +139,11 @@ class NoticeData:
     zip_tier: str = ""                 # "Tier 1" / "Tier 2" from config.TARGET_ZIPS' source workbook, "" if unknown/not in target set
     equity_signal: str = ""            # "confirmed_high" (>=30%), "low_equity_flag" (20-30%), "low_equity_drop" (<20%, suppressed before reaching output), "likely_high_ownership", or "unknown"
 
+    # Target-neighborhood gate (set by enrichment_pipeline Step 3c Jackson tier / Step 8c)
+    neighborhood: str = ""             # SiftMap neighborhood name, "" if not looked up / not found
+    neighborhood_status: str = ""      # "in_target" / "unplaced" (kept, held for review) / "" (county has no list)
+    address_source: str = ""           # "siftmap_owner" when the property address came from a decedent-name match
+
 
 # ── Known cities for city-fallback matching ────────────────────────────
 # Sorted longest-first so "Lenoir City" matches before "City". Originally

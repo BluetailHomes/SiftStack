@@ -52,6 +52,7 @@ import sys
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import config  # noqa: E402
 import smartskip  # noqa: E402
 from llm_client import _extract_response_text  # noqa: E402
 from p1_enrich import LITIGATOR_TAG, score_all, tier_for  # noqa: E402
@@ -74,16 +75,10 @@ TIER_ORDER = {"Dial First": 1, "Dial Second": 2, "Dial Third": 3, "Dial Fourth":
 CLOSE_RELS = {"Child", "Spouse", "Sibling"}
 LINE_TYPES = {"mobile": "MOBILE", "landline": "LANDLINE"}
 MODEL = "claude-opus-5-5"
-# The 25 neighborhoods on every "Jackson - Priority 1" SiftMap preset (2026-11-07). Paid research
-# stays inside them, like P1. A record with no neighborhood on file passes (never drop on missing data).
-P1_NEIGHBORHOODS = {"Jackson": frozenset(n.lower() for n in (
-    "Vineyard - Kansas City", "East Meyer 6", "Bristol - Independence", "Ruskin Heights",
-    "Rockwood - Independence", "Swope Park Campus", "South Town Fork Creek", "Oak Park Southwest",
-    "Noble And Gregory Ridge", "Blue Hills - Kansas City", "Marlborough Heights Marlborough Pride",
-    "Fairwood And Robandee", "North Town Fork Creek", "Vineyard Northwest", "Ruskin Hills",
-    "Maywood - Independence", "Fairlane - Kansas City", "Three Trails", "Robandee South",
-    "Ivanhoe Southwest", "Hickman Mills", "Cunningham Ridge", "Ivanhoe Southeast", "Wendell Phillips",
-    "Benton - Independence"))}
+# The 25 neighborhoods on every "Jackson - Priority 1" SiftMap preset (config.TARGET_NEIGHBORHOODS).
+# Paid research stays inside them, like P1. A record with no neighborhood on file passes (never drop
+# on missing data).
+P1_NEIGHBORHOODS = config.TARGET_NEIGHBORHOODS
 
 
 def _title(t) -> str:

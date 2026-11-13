@@ -349,6 +349,17 @@ def _build_tags(notice: NoticeData) -> str:
     elif notice.equity_signal == "confirmed_high":
         tags.append("high_equity")
 
+    # Target-neighborhood gate (enrichment_pipeline Step 8c). nbhd_unplaced =
+    # no property address or SiftMap couldn't place it: kept, but hold for review.
+    if notice.neighborhood_status == "in_target":
+        tags.append("p1_neighborhood")
+    elif notice.neighborhood_status == "unplaced":
+        tags.append("nbhd_unplaced")
+    elif notice.neighborhood_status == "outside_target":  # only on --include-off-target runs
+        tags.append("nbhd_outside")
+    if notice.address_source == "siftmap_owner":
+        tags.append("addr_from_owner_name")
+
     return ",".join(tags)
 
 
