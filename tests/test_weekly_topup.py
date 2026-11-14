@@ -27,3 +27,53 @@ def test_live_force_says_overriding():
 def test_no_warning_when_batch_missing():
     first = report(_plan(), "2026-10-26", 1).splitlines()[0]
     assert first.startswith("Weekly top-up plan")
+
+
+def test_report_shows_score_order():
+    p = _plan()
+    p["eligible"] = [dict(p["eligible"][0], score=16), dict(p["eligible"][0], score=11)]
+    assert "batch scores 16 down to 11 (avg 13.5)" in report(p, "2026-10-26", 2)
+
+
+def test_rungs_include_notice_of_default_lowest_first():
+    from weekly_topup import RUNGS
+    assert RUNGS[0] == "Absentee + Notice of Default - 1.7 doors per deal"
+    assert "Notice of Default - 7.1 doors per deal" in RUNGS
+
+
+def _index():
+    import weekly_topup as w
+    idx = w.OwnerIndex.__new__(w.OwnerIndex)
+    from collections import defaultdict
+    idx.by_owner, idx.by_key, idx.by_phone = defaultdict(set), defaultdict(set), defaultdict(set)
+    idx.unreadable = 2
+    idx.by_owner["own-1"].add(("declined (not_interested)", "prop-A"))
+    idx.by_key["jane doe|123 main"].add(("active (new_lead)", "prop-B"))
+    idx.by_phone["8165551234"].add(("tagged 'Do Not Market'", "prop-C"))
+    return idx
+
+
+def test_owner_index_round_trip_blocks_the_same(tmp_path, monkeypatch):
+    import weekly_topup as w
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    idx = _index()
+    idx.save(w.index_path("2026-11-23"))
+    back = w.load_owner_index("2026-11-23")
+    assert back is not None and back.unreadable == 2
+    d = {"owner": {"uuid": "own-1", "phones": [{"number": "8165551234"}]}}
+    assert back.block("prop-X", d) == idx.block("prop-X", d)
+    assert "declined" in back.block("prop-X", d) and "Do Not Market" in back.block("prop-X", d)
+    assert back.block("prop-A", {"owner": {"uuid": "own-1"}}) is None  # its own property never blocks
+
+
+def test_stale_or_missing_index_is_rebuilt(tmp_path, monkeypatch):
+    import datetime as dt
+    import weekly_topup as w
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    assert w.load_owner_index("2026-11-23") is None
+    _index().save(w.index_path("2026-11-23"))
+    later = w.ct_now() + w.INDEX_MAX_AGE + dt.timedelta(minutes=1)
+    assert w.load_owner_index("2026-11-23", now=later) is None
+    assert w.load_owner_index("2026-11-30") is None  # another Monday's batch
+    w.index_path("2026-11-23").write_text("{not json", encoding="utf-8")
+    assert w.load_owner_index("2026-11-23") is None

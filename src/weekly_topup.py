@@ -55,12 +55,14 @@ from pm_text_sender import (  # noqa: E402
     _best_primary, _env, _google_chat, _in_window, _slack, _tag_key, ct_now, drip_rows, enroll_block, load_day,
     record_stop, review_tags_problem,
 )
+import top_leads_score  # noqa: E402
 
 PRESET_01_UUID = "4881671f-526c-440f-add2-97564c89d069"
 P1_TAG = "Priority 1"
 LIST_PREFIX = "Jackson - Priority 1 - "
-# P1 rung lists. Always worked lowest doors-per-deal first (Kaycie 2026-11-07): rungs already in presets
-# 01/02 get no head start, and SiftMap auto-adds compete inside their rung like any other record.
+# P1 rung lists. The batch takes the highest Top Leads score first across every rung (Kaycie
+# 2026-11-13, top_leads_score.py); a record's lowest doors-per-deal rung breaks ties (the order used
+# from 2026-11-07). Rungs already in presets 01/02 get no head start.
 _RUNGS = [
     "Out-of-State + Vacant - 12.3 doors per deal",
     "Free & Clear + Out-of-State + Vacant - 10.7 doors per deal",
@@ -72,6 +74,9 @@ _RUNGS = [
     # Added 2026-11-06 (Kaycie): non-Vacant P1 rungs that still have phoned, unworked records.
     "Estate Sale - 13.9 doors per deal",
     "Bad Credit + Out-of-State - 19.3 doors per deal",
+    # Added 2026-11-13 (Kaycie): the two foreclosure rungs the top-up never searched.
+    "Absentee + Notice of Default - 1.7 doors per deal",
+    "Notice of Default - 7.1 doors per deal",
 ]
 
 
@@ -194,6 +199,22 @@ class OwnerIndex:
             for n in _all_phones(d):
                 self.by_phone[_d10(n)] |= {(l, u) for l in labs}
 
+    def save(self, path) -> None:
+        """Write the index so the validate step (same job, minutes later) can reuse it instead of
+        re-reading ~1,000 records; see load_owner_index()."""
+        dump = lambda m: {k: sorted(map(list, v)) for k, v in m.items()}  # noqa: E731
+        path.write_text(json.dumps({"built": ct_now().isoformat(), "unreadable": self.unreadable,
+                                          "by_owner": dump(self.by_owner), "by_key": dump(self.by_key),
+                                          "by_phone": dump(self.by_phone)}), encoding="utf-8")
+
+    @classmethod
+    def from_saved(cls, data: dict) -> "OwnerIndex":
+        self = cls.__new__(cls)
+        load = lambda m: defaultdict(set, {k: {tuple(x) for x in v} for k, v in m.items()})  # noqa: E731
+        self.by_owner, self.by_key, self.by_phone = load(data["by_owner"]), load(data["by_key"]), load(data["by_phone"])
+        self.unreadable = data.get("unreadable", 0)
+        return self
+
     def block(self, uuid: str, d: dict) -> str | None:
         """Why this owner is held because of another property, or None."""
         o = d.get("owner") or {}
@@ -204,6 +225,26 @@ class OwnerIndex:
             hits |= self.by_phone.get(_d10(n), set())
         hits = sorted({l for l, pu in hits if pu != uuid})
         return f"owner-level: {', '.join(hits)} on another property" if hits else None
+
+
+INDEX_MAX_AGE = dt.timedelta(hours=3)  # apply -> validate in one Friday job is well under this
+
+
+def index_path(batch_date: str):
+    return STATE_DIR / f"owner_index_{batch_date}.json"
+
+
+def load_owner_index(batch_date: str, now: dt.datetime | None = None) -> OwnerIndex | None:
+    """The index the apply step saved for this batch, if it was built in the last INDEX_MAX_AGE.
+    Anything missing, unreadable or stale means None, and validate rebuilds it from DataSift."""
+    try:
+        data = json.loads(index_path(batch_date).read_text(encoding="utf-8"))
+        age = (now or ct_now()) - dt.datetime.fromisoformat(data["built"])
+        if dt.timedelta(0) <= age <= INDEX_MAX_AGE:
+            return OwnerIndex.from_saved(data)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
 
 
 def skip_reason(d: dict) -> str | None:
@@ -286,56 +327,76 @@ def plan(api: Sift, target: int, pinned: dict | None = None, idx: OwnerIndex | N
     never = base.setdefault("must_not", {}).setdefault("any_tags", [])
     never += [u for u, _ in (STOP_REVIEW_TAG, POST_SEQ_HOLD_TAG) if u not in never]
 
-    # Lowest doors-per-deal first, used or not; a new rung is added to presets 01/02 once it supplies a record.
+    # Every rung is searched; a record belongs to its lowest doors-per-deal rung (RUNGS is sorted).
     idx = idx or OwnerIndex(api)
     if pinned is not None:
         target = len(pinned)
-    eligible, mail_only, skipped, seen, pool_by_rung, added = [], [], Counter(), set(), {}, []
-    for r in rungs:
-        if len(eligible) >= target or (pinned is not None and seen >= set(pinned)):
-            break
+    eligible, mail_only, skipped, seen, pool_by_rung = [], [], Counter(), set(), {}
+    cands = []  # (uuid, rung, rung position) in doors-per-deal order
+    for pos, r in enumerate(rungs):
         must = dict(base, any_lists=[r["uuid"]], any_tags=[p1_uuid])
         # Search rows don't carry assigned_to/status reliably; skip_reason() checks the detail.
         rows = api.search(must)
         pool_by_rung[r["name"]] = len(rows)
-        took = 0
         for row in rows:
-            if len(eligible) >= target:
-                break
             u = row["uuid"]
             if u in seen or (pinned is not None and u not in pinned):
                 continue
             seen.add(u)
+            cands.append((u, r, pos))
+
+    # Score every candidate that passes the record-level checks, then walk them highest score first
+    # (ties: lowest doors-per-deal rung, then search order) through the costlier owner/drip checks.
+    scored = []
+    for i, (u, r, pos) in enumerate(cands):
+        try:
             d = api.call(f"/api/internal/property/{u}/")
-            why = skip_reason(d) or idx.block(u, d)
-            if not why:
-                stop = record_stop(api, u, d)
-                if stop["hold"]:
-                    why = "STOP policy hold"
-            if not why:
-                try:
-                    why = "has drip history" if drip_rows(api, u) else None
-                except RuntimeError:
-                    why = "drip history unreadable"
-            if why:
-                skipped[why] += 1
-                continue
-            o = d.get("owner") or {}
-            addr = d.get("address")
-            rec = {"uuid": u, "rung": r["name"], "owner_uuid": o.get("uuid"),
-                   "name": f"{o.get('first_name') or ''} {o.get('last_name') or ''}".strip(),
-                   "address": addr.get("street") if isinstance(addr, dict) else addr,
-                   "best_phone": _best_primary({p["number"]: p for p in (o.get("phones") or [])}),
-                   "current_primary": o.get("primary_phone")}
-            if rec["best_phone"] and any(e["best_phone"] == rec["best_phone"] or (rec["owner_uuid"] and e["owner_uuid"] == rec["owner_uuid"]) for e in eligible):
-                skipped["owner or number already in batch"] += 1
-            elif rec["best_phone"]:
-                eligible.append(rec)
-                took += 1
-            else:
-                mail_only.append(rec)
-        if not r["used"] and took:
-            added.append(r)
+        except RuntimeError as e:
+            if "HTTP 404" not in str(e):
+                raise
+            skipped["record no longer exists"] += 1
+            continue
+        if why := skip_reason(d):
+            skipped[why] += 1
+            continue
+        s = top_leads_score.score(d)
+        scored.append((-s["score"], pos, i, u, r, d, s))
+    scored.sort(key=lambda t: t[:3])
+
+    took_by_rung = Counter()
+    for _neg, _pos, _i, u, r, d, s in scored:
+        if len(eligible) >= target:
+            break
+        why = idx.block(u, d)
+        if not why:
+            stop = record_stop(api, u, d)
+            if stop["hold"]:
+                why = "STOP policy hold"
+        if not why:
+            try:
+                why = "has drip history" if drip_rows(api, u) else None
+            except RuntimeError:
+                why = "drip history unreadable"
+        if why:
+            skipped[why] += 1
+            continue
+        o = d.get("owner") or {}
+        addr = d.get("address")
+        rec = {"uuid": u, "rung": r["name"], "score": s["score"], "signals": s["signals"],
+               "owner_uuid": o.get("uuid"),
+               "name": f"{o.get('first_name') or ''} {o.get('last_name') or ''}".strip(),
+               "address": addr.get("street") if isinstance(addr, dict) else addr,
+               "best_phone": _best_primary({p["number"]: p for p in (o.get("phones") or [])}),
+               "current_primary": o.get("primary_phone")}
+        if rec["best_phone"] and any(e["best_phone"] == rec["best_phone"] or (rec["owner_uuid"] and e["owner_uuid"] == rec["owner_uuid"]) for e in eligible):
+            skipped["owner or number already in batch"] += 1
+        elif rec["best_phone"]:
+            eligible.append(rec)
+            took_by_rung[r["uuid"]] += 1
+        else:
+            mail_only.append(rec)
+    # A rung not yet in presets 01/02 is added once it supplies a record.
+    added = [r for r in rungs if not r["used"] and took_by_rung[r["uuid"]]]
 
     if pinned is None:
         for rec, ln in zip(eligible, line_plan(len(eligible))):
@@ -383,6 +444,9 @@ def report(p: dict, batch_date: str, target: int, live: bool = False, batch_exis
     by_rung = Counter(r["rung"] for r in el)
     for name, n in p["pool_by_rung"].items():
         lines.append(f"    {name}: {n} in list with a phone, taking {by_rung.get(name, 0)}")
+    if scores := [r["score"] for r in el if r.get("score") is not None]:
+        lines.append(f"  Order: highest Top Leads score first; batch scores {max(scores)} down to {min(scores)} "
+                     f"(avg {sum(scores) / len(scores):.1f})")
     lines.append("  Lines: " + ", ".join(f"{k} {v}" for k, v in sorted(Counter(r["line"] for r in el).items())))
     lines.append(f"  Primary phone changes: {sum(r['primary_change'] for r in el)}")
     if p["skipped"]:
@@ -645,13 +709,21 @@ def main() -> int:
     api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
     batch_date = args.batch_date or next_monday(ct_now().date()).isoformat()
     if args.cmd == "validate":
-        marker, text = validate(api, batch_date)
+        idx = load_owner_index(batch_date)
+        print("Owner-level index: " + ("reused from the apply step" if idx else "rebuilding from DataSift"))
+        marker, text = validate(api, batch_date, idx=idx)
         print(text)
         if args.slack:
             _slack(text)
             _google_chat(text)
         return 0 if marker["ok"] else 1
-    p = plan(api, args.target, pinned=load_pinned(args.uuids_file) if args.uuids_file else None)
+    idx = OwnerIndex(api)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        idx.save(index_path(batch_date))
+    except OSError as e:
+        print(f"Could not save the owner-level index ({e}); validate will rebuild it.")
+    p = plan(api, args.target, pinned=load_pinned(args.uuids_file) if args.uuids_file else None, idx=idx)
     exists = f"Batch {batch_date}" in tag_uuids(api)
     text = report(p, batch_date, args.target, live=live, batch_exists=exists,
                   force=getattr(args, "force", False))
