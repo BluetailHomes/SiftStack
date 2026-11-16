@@ -54,7 +54,7 @@ jobs:
         if: always()
         env:
           REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
-          DRIP_GUARD_TAGS: "Priority 1"
+          DRIP_GUARD_TAGS: "Priority 1,Legacy Reopen Texts 2026-11-16"
         run: |
           ARGS=""
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="--dry-run"; fi
