@@ -249,3 +249,10 @@ def test_build_csv_uses_the_mapped_headers():
     text = smartskip.build_csv([od.skip_row(_d())]).decode()
     assert text.splitlines()[0] == ",".join(smartskip.SCHEMA.values())
     assert "Nellie,Monroe" in text and "4614 Lawn Ave" in text
+
+
+def test_eligible_off_market_single_family_only():
+    assert od.eligible(_d(mls="Off Market", structure_type="Single Family Residential"), TODAY) is None
+    assert od.eligible(_d(mls="Active", structure_type="Single Family Residential"), TODAY) == "listed (Active)"
+    assert od.eligible(_d(mls="Off Market", structure_type="Multi-Family"), TODAY) == "not single-family (Multi-Family)"
+    assert od.eligible(_d(mls=None, structure_type=None), TODAY) is None     # missing data never drops a record

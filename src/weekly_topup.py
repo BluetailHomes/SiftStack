@@ -51,7 +51,7 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pm_text_sender import (  # noqa: E402
-    CALLER_EMAIL, CALLER_USER_UUID, POST_SEQ_HOLD_TAG, PRESET_01_TITLE, STATE_DIR, STOP_REVIEW_TAG, Sift, _all_phones,
+    CALLER_EMAIL, CALLER_USER_UUID, DEEP_PROSPECTING_TAG, DP_REVIEW_TAG, POST_SEQ_HOLD_TAG, PRESET_01_TITLE, STATE_DIR, STOP_REVIEW_TAG, Sift, _all_phones,
     _best_primary, _env, _google_chat, _in_window, _slack, _tag_key, ct_now, drip_rows, enroll_block, load_day,
     record_stop, review_tags_problem,
 )
@@ -93,6 +93,13 @@ MAIL_ONLY_TAG = "Mail Only"
 # Ty, Oct 13 workshop [01:49:57]: every probate/obituary record goes to deep prospecting, never
 # straight to calling (5% contact on the decedent's numbers vs 60-70% once heirs are found).
 DECEASED_TAGS = ("Obituary", "Probate", "Pre-Probate/Deceased")
+# Obituary records obituary_dp.py has researched and Kaycie has cleared ("DP Researched", no "DP
+# Review" / "Deep Prospecting": no obituary confirmed, or a co-owner/relative died and the owner is
+# alive) are callable like P1 (Kaycie 2026-11-15). They come from the P1-neighborhood obituary list,
+# which never carries the Priority 1 tag, as one extra source after the rungs.
+OBIT_LIST = "83c72451-32c7-4be6-a596-7ed23cf9adb1"   # Jackson - Obituary - P1 Neighborhoods
+OBIT_SOURCE = "Obituary P1 - DP cleared"
+DP_RESEARCHED_TAG = "DP Researched"
 TAG_CHUNK = 50
 BACKUP_DIR = STATE_DIR.parent / "account_backups"
 MIN_EQUITY = 30.0                    # known equity below this is suppressed; unknown equity is kept
@@ -247,6 +254,11 @@ def load_owner_index(batch_date: str, now: dt.datetime | None = None) -> OwnerIn
     return None
 
 
+def dp_cleared(tags: list[str]) -> bool:
+    """Researched by obituary_dp.py and released by Kaycie: no heir case, nothing awaiting review."""
+    return DP_RESEARCHED_TAG in tags and DP_REVIEW_TAG[1] not in tags and DEEP_PROSPECTING_TAG[1] not in tags
+
+
 def skip_reason(d: dict) -> str | None:
     """Why a property detail can't go into the batch, or None if it can (phone checked separately)."""
     tags = [t if isinstance(t, str) else (t.get("title") or "") for t in (d.get("tags") or [])]
@@ -259,7 +271,8 @@ def skip_reason(d: dict) -> str | None:
         return "has status"
     if "Mail Only" in tags:
         return "already Mail Only"
-    if any(t in DECEASED_TAGS or t.startswith("Obit ") for t in tags):
+    if any(t in DECEASED_TAGS or t.startswith("Obit ") for t in tags) and not (
+            dp_cleared(tags) and not any(t in ("Probate", "Pre-Probate/Deceased") for t in tags)):
         return "probate/obituary (deep prospecting)"
     if any(t.startswith("Batch ") or t.startswith("SMS Line") for t in tags):
         return "batch/line tag"
@@ -327,6 +340,18 @@ def plan(api: Sift, target: int, pinned: dict | None = None, idx: OwnerIndex | N
     never = base.setdefault("must_not", {}).setdefault("any_tags", [])
     never += [u for u, _ in (STOP_REVIEW_TAG, POST_SEQ_HOLD_TAG) if u not in never]
 
+    # Cleared obituary records: last source, so a P1 rung wins a tie. Same base filters, but searched
+    # on the obituary list + "DP Researched" instead of a rung list + Priority 1; skip_reason()
+    # re-checks that nothing is awaiting review or tagged Deep Prospecting.
+    by_title = {t.get("title"): t["uuid"] for t in tags}
+    if researched := by_title.get(DP_RESEARCHED_TAG):
+        held = [by_title[t] for t in (DP_REVIEW_TAG[1], DEEP_PROSPECTING_TAG[1]) if t in by_title]
+        must = copy.deepcopy(base)
+        must["must_not"]["any_tags"] = never + [u for u in held if u not in never]
+        must.update(any_lists=[OBIT_LIST], any_tags=[researched])
+        rungs.append({"name": OBIT_SOURCE, "uuid": OBIT_LIST, "count": None, "used": OBIT_LIST in used_uuids,
+                      "must": must})
+
     # Every rung is searched; a record belongs to its lowest doors-per-deal rung (RUNGS is sorted).
     idx = idx or OwnerIndex(api)
     if pinned is not None:
@@ -334,7 +359,7 @@ def plan(api: Sift, target: int, pinned: dict | None = None, idx: OwnerIndex | N
     eligible, mail_only, skipped, seen, pool_by_rung = [], [], Counter(), set(), {}
     cands = []  # (uuid, rung, rung position) in doors-per-deal order
     for pos, r in enumerate(rungs):
-        must = dict(base, any_lists=[r["uuid"]], any_tags=[p1_uuid])
+        must = r.get("must") or dict(base, any_lists=[r["uuid"]], any_tags=[p1_uuid])
         # Search rows don't carry assigned_to/status reliably; skip_reason() checks the detail.
         rows = api.search(must)
         pool_by_rung[r["name"]] = len(rows)

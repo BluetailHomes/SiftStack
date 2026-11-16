@@ -124,6 +124,13 @@ def eligible(d: dict, today: dt.date, county: str = "Jackson", state: str = "MO"
     hood = re.sub(r",\s*mo$", "", str(d.get("neighborhood") or "").strip().lower())
     if hood and county in P1_NEIGHBORHOODS and hood not in P1_NEIGHBORHOODS[county]:
         return "outside P1 neighborhoods"
+    # Off-market single-family only (Kaycie 2026-11-15). A blank field is kept, never dropped.
+    mls = str(d.get("mls") or "").strip()
+    if mls and mls.lower() != "off market":
+        return f"listed ({mls})"
+    st = str(d.get("structure_type") or "").strip()
+    if st and "single family" not in st.lower():
+        return f"not single-family ({st})"
     o = d.get("owner") or {}
     if (o.get("type") or "person").lower() not in ("person", "individual") or not (o.get("first_name") or "").strip():
         return "not a person"

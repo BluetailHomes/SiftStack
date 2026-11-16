@@ -77,3 +77,18 @@ def test_stale_or_missing_index_is_rebuilt(tmp_path, monkeypatch):
     assert w.load_owner_index("2026-11-30") is None  # another Monday's batch
     w.index_path("2026-11-23").write_text("{not json", encoding="utf-8")
     assert w.load_owner_index("2026-11-23") is None
+
+
+def _rec(tags):
+    return {"tags": tags, "status": None, "assigned_to": None, "owner": {"type": "person", "first_name": "Ann"},
+            "sms_attempts": 0, "predictivecall_attempts": 0}
+
+
+def test_obituary_blocked_until_dp_cleared():
+    from weekly_topup import skip_reason
+    deep = "probate/obituary (deep prospecting)"
+    assert skip_reason(_rec(["Obituary P1", "Obit 6mo+"])) == deep                          # not researched yet
+    assert skip_reason(_rec(["Obit 6mo+", "DP Researched", "DP Review"]))                   # awaiting review
+    assert skip_reason(_rec(["Obit 6mo+", "DP Researched", "Deep Prospecting"]))            # heir case
+    assert skip_reason(_rec(["Obit 6mo+", "Probate", "DP Researched"])) == deep             # probate still waits
+    assert skip_reason(_rec(["Obituary P1", "Obit 6mo+", "DP Researched"])) != deep         # cleared

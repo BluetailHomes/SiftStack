@@ -42,6 +42,6 @@ jobs:
         env:
           REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          DRIP_GUARD_TAGS: "Priority 1,Legacy Reopen Texts 2026-11-16,Legacy Reopen Texts 2026-11-23"
+          DRIP_GUARD_TAGS: "Priority 1,Legacy Reopen Texts 2026-11-16,Legacy Reopen Texts 2026-11-23,Obituary P1"
           DRIP_SWAP_LIVE: ${{ vars.DRIP_SWAP_LIVE }}
         run: python src/drip_exit_guard.py
