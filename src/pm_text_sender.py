@@ -140,7 +140,9 @@ class Sift:
         # hammering and then sleeping through long backoffs (2026-11-16 am-start timeout).
         self.gap = self.MIN_GAP
 
-    MIN_GAP, MAX_GAP = 0.3, 3.0
+    # DataSift allows 120 requests/minute and 5,000/hour per ACCOUNT (shared by every job on the key);
+    # its docs advise ~80-85/minute sustained. 0.7 s = ~85/minute.
+    MIN_GAP, MAX_GAP = 0.7, 3.0
 
     def call(self, path, method="GET", body=None, override=None):
         gap = self.gap - (time.time() - self._last)
@@ -1147,6 +1149,11 @@ def run_am_start(args) -> int:
         capacity = load_capacity(api, Counter(r.get("line") for r in prior if r.get("ok") and r.get("line")))
     except RuntimeError as ex:
         return _alert(args, f":x: Morning start {day}: NOT launched. Line capacity unreadable ({str(ex)[:200]}). No record was changed.")
+    if getattr(args, "ignore_line_room", False):
+        # Manual override (Kaycie, 2026-11-16): start the whole batch even when the room estimate
+        # (which reserves 2 texts per running drip and per new opener) says a line is full.
+        for v in capacity.values():
+            v["capacity"] = max(0, MAX_NEW_PER_LINE - v.get("started", 0))
     if marker and not problem:
         candidates, marker_lines = list(marker["uuids"]), marker.get("lines") or {}
         source = f"readiness marker ({len(candidates)} records)"
@@ -1671,6 +1678,8 @@ def main() -> int:
     m.add_argument("--only-between", help="Central window like 09:50-12:00")
     m.add_argument("--ready-file", help="Friday readiness marker (topup_ready_<batch>.json); required for --send")
     m.add_argument("--batch-date", help="YYYY-MM-DD of the Batch tag (default today)")
+    m.add_argument("--ignore-line-room", action="store_true",
+                   help="manual only: start up to the 30-per-line ceiling, ignoring today's room estimate")
     m.set_defaults(fn=run_am_start)
     x = sub.add_parser("extra-texts", help="one confirmation text to each extra mobile number on prospecting records")
     x.add_argument("--send", action="store_true", help="actually send (default is dry run)")
