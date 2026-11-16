@@ -67,7 +67,10 @@ jobs:
       github.event.schedule == '50 14 * * 1-5' || github.event.schedule == '50 15 * * 1-5'
       || (github.event_name == 'workflow_dispatch' && inputs.mode == 'am-start')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 50, not 20: am-start reads every batch record before it changes any, and DataSift's
+    # API throttling (shared with the 5-minute responder/guard) stretched that past 20 minutes
+    # on 2026-11-16, so the run was cancelled with nothing started.
+    timeout-minutes: 50
     # Overlapping starts queue instead of running side by side. The guard step then skips
     # a start after one that already finished today, carries earlier runs' state over (so
     # line caps count the whole day), and fails closed with a Slack alert when unsure.
@@ -114,6 +117,17 @@ jobs:
           if [ "$LIVE" = "true" ]; then ARGS="$ARGS --send"; fi
           if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 09:40-12:00"; fi
           python src/pm_text_sender.py $ARGS
+      - name: Alert if the morning start was cancelled or timed out
+        # A cancelled step never reaches the script's own Slack report, so say so here.
+        # Failures already alert from the guard and the script themselves; only a cancel/timeout is silent.
+        if: cancelled()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -n "$SLACK_WEBHOOK_URL" ] || exit 0
+          MSG=":x: Morning start was cancelled or timed out before it finished. Records may still be in preset 01 with no status. Check before Rahaf calls: $RUN_URL"
+          curl -s -X POST -H 'Content-Type: application/json' -d "{\"text\": \"$MSG\"}" "$SLACK_WEBHOOK_URL" || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:

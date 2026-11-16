@@ -135,9 +135,15 @@ def _env(name: str) -> str:
 class Sift:
     def __init__(self, key: str):
         self.key, self._last = key, 0.0
+        # Pace adaptively: every 429 doubles the gap between calls (up to 3 s) and each
+        # success eases it back toward 0.3 s, so a throttled run slows down instead of
+        # hammering and then sleeping through long backoffs (2026-11-16 am-start timeout).
+        self.gap = self.MIN_GAP
+
+    MIN_GAP, MAX_GAP = 0.3, 3.0
 
     def call(self, path, method="GET", body=None, override=None):
-        gap = 0.3 - (time.time() - self._last)
+        gap = self.gap - (time.time() - self._last)
         if gap > 0:
             time.sleep(gap)
         self._last = time.time()
@@ -152,10 +158,12 @@ class Sift:
             try:
                 with urllib.request.urlopen(req, timeout=90) as r:
                     t = r.read().decode()
+                    self.gap = max(self.MIN_GAP, self.gap * 0.95)
                     return json.loads(t) if t.strip().startswith(("{", "[")) else t
             except urllib.error.HTTPError as e:
                 txt = e.read().decode(errors="replace")
                 if e.code == 429 and attempt < 11:
+                    self.gap = min(self.MAX_GAP, self.gap * 2)
                     # The server's "available in N seconds" hint is often too short when
                     # throttling persists, so back off at least 3s, 6s, 9s, ... as well.
                     m = re.search(r"available in (\d+)\s*second", txt, re.I)
