@@ -185,10 +185,66 @@ def deduplicate(notices: list[NoticeData]) -> list[NoticeData]:
     # Add address-deduped notices
     result.extend(seen_addrs.values())
 
+    # Probate estates: each estate notice is republished ~4 weeks in a row
+    # under a new notice ID, so ID dedup keeps every copy (2026-11-12 Jackson
+    # backfill: 106 records for ~39 estates). Merge them on decedent + county.
+    result = _merge_probate_estates(result)
+
     removed = len(notices) - len(result)
     if removed:
         logger.info("Deduplicated: removed %d duplicate notices", removed)
     return result
+
+
+_NAME_SUFFIX_RE = re.compile(r"\b(jr|sr|ii|iii|iv|deceased|decd)\b\.?", re.I)
+
+
+def _estate_key(notice: NoticeData) -> str:
+    """Normalized decedent + county key, or "" when there's no decedent name."""
+    name = (notice.decedent_name or "").lower()
+    name = _NAME_SUFFIX_RE.sub(" ", name)
+    tokens = [t for t in re.sub(r"[^a-z ]", " ", name).split() if len(t) > 1]
+    if len(tokens) < 2:
+        return ""
+    # First + last token; drops middle names/initials that vary by publication
+    return f"{(notice.county or '').lower()}|{tokens[0]}|{tokens[-1]}"
+
+
+def _merge_probate_estates(notices: list[NoticeData]) -> list[NoticeData]:
+    """Collapse republished probate notices for the same estate into one record.
+
+    Keeps the EARLIEST publication date (closest to the filing — what the
+    6-12 month window and first-to-contact both care about) and fills any
+    blank fields from the later copies. Non-probate records and probate
+    records without a usable decedent name pass through untouched.
+    """
+    from dataclasses import fields
+
+    merged: dict[str, NoticeData] = {}
+    out: list[NoticeData] = []
+    for n in notices:
+        key = _estate_key(n) if n.notice_type == "probate" else ""
+        if not key:
+            out.append(n)
+            continue
+        keep = merged.get(key)
+        if keep is None:
+            merged[key] = n
+            out.append(n)
+            continue
+        if n.date_added and (not keep.date_added or n.date_added < keep.date_added):
+            keep.date_added = n.date_added
+            keep.source_url = n.source_url or keep.source_url
+        for f in fields(keep):
+            cur = getattr(keep, f.name)
+            new = getattr(n, f.name)
+            if (cur in ("", None) or cur == [] or cur == {}) and new not in ("", None, [], {}):
+                setattr(keep, f.name, new)
+    collapsed = len(notices) - len(out)
+    if collapsed:
+        logger.info("Probate estates: merged %d republished notices into %d estates",
+                    collapsed, len(merged))
+    return out
 
 
 def write_csv(notices: list[NoticeData], filename: str | None = None) -> Path:

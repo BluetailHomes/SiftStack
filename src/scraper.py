@@ -53,6 +53,24 @@ from notice_parser import NoticeData, resolve_notice_county, parse_notice_page
 logger = logging.getLogger(__name__)
 
 
+class SiteAccessBlocked(Exception):
+    """The notice site refused to show notices to this computer (access block)."""
+
+
+# Seen live 2026-11-12 on mopublicnotices.com after ~500 notice views in one
+# evening across several runs: every notice detail page showed this banner and no
+# View Notice button. Fresh logins didn't clear it. Stop the whole run when it
+# appears; never retry around it.
+_ACCESS_BLOCK_TEXT = "not permitted to view public notices"
+
+
+async def _is_access_blocked(page: Page) -> bool:
+    try:
+        return _ACCESS_BLOCK_TEXT in (await page.content()).lower()
+    except Exception:
+        return False
+
+
 async def delay() -> None:
     """Random delay between requests to avoid detection."""
     wait = random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX)
@@ -252,6 +270,7 @@ async def run_saved_search(
     max_notices: int = 0,
     seen_ids: dict[str, str] | None = None,
     captcha_failed_ids: dict[str, dict] | None = None,
+    progress: dict | None = None,
 ) -> list[NoticeData]:
     """Select a saved search from the dropdown, paginate, and scrape each notice.
 
@@ -260,6 +279,9 @@ async def run_saved_search(
                        to push results incrementally.
         start_page: Page number to start scraping from (default 1). Use this to
                     resume a previous run without re-scraping earlier pages.
+        progress: Optional dict the caller passes in. If the search stops before its
+                  last page, "resume_page" is set to the first page not yet scraped,
+                  so the caller can resume in a fresh browser session.
 
     Returns list of parsed and filtered NoticeData.
     """
@@ -344,17 +366,49 @@ async def run_saved_search(
             if not next_btn:
                 logger.error("  Cannot reach page %d — no next button at page %d", start_page, current_page)
                 return []
-            await next_btn.click()
+            try:
+                await next_btn.click(timeout=15_000)
+            except Exception:
+                await next_btn.evaluate("el => el.click()")
             await page.wait_for_load_state("load")
+            await delay()
             await delay()
             current_page, total_pages = await _get_page_info(page)
         logger.info("  Reached page %d/%d", current_page, total_pages)
 
     while True:
         logger.info("  Scraping page %d/%d", current_page, total_pages)
-        page_notices = await _scrape_results_page(
-            page, search, since_date, llm_api_key, seen_ids, captcha_failed_ids,
-        )
+        try:
+            page_notices = await _scrape_results_page(
+                page, search, since_date, llm_api_key, seen_ids, captcha_failed_ids,
+            )
+        except SiteAccessBlocked:
+            if progress is not None:
+                progress["blocked"] = True
+                progress.pop("resume_page", None)
+            logger.error(
+                "  Stopping %s at page %d — site access blocked (returning %d notices from earlier pages)",
+                search.saved_search_name, current_page, len(notices),
+            )
+            break
+        # 2026-11-12 (Jackson probate backfill): after ~150 notice detail views in
+        # one login session, the site returns result pages that say "Page N of 20"
+        # but have no results grid, and re-selecting the search in the same session
+        # doesn't help. A fresh login renders the same page normally. Stop here and
+        # hand the page number back so scrape_all can resume in a new session.
+        if (
+            not page_notices
+            and (current_page > 1 or total_pages > 1)
+            and not await page.query_selector(SEL_VIEW_BUTTON_PATTERN)
+        ):
+            logger.warning(
+                "  Page %d/%d has no visible results grid — session looks exhausted; "
+                "stopping so the caller can resume in a fresh session",
+                current_page, total_pages,
+            )
+            if progress is not None:
+                progress["resume_page"] = current_page
+            break
         notices.extend(page_notices)
 
         # Push this page's results immediately so they survive timeouts
@@ -430,7 +484,17 @@ async def run_saved_search(
                     # rather than burning up to 4x60s (4+ minutes) before
                     # this loop gives up on a page that might recover within
                     # seconds on a clean attempt.
-                    await next_btn.click(timeout=15_000)
+                    if attempt == 1:
+                        await next_btn.click(timeout=15_000)
+                    else:
+                        # 2026-11-12 (mopublicnotices Jackson probate): after
+                        # the first click failed to advance, the Next button
+                        # stayed in the DOM but "not visible" for every later
+                        # attempt. The button is an ASP.NET submit input, so a
+                        # DOM-level click still fires the postback even when
+                        # Playwright's visibility check refuses.
+                        logger.info("  Using DOM click for Next (attempt %d/4)", attempt)
+                        await next_btn.evaluate("el => el.click()")
                     await page.wait_for_load_state("load")
                     # "load" alone isn't enough after many postbacks in one
                     # session (confirmed live 2026-07-22 — this got flakier
@@ -463,11 +527,31 @@ async def run_saved_search(
                 # immediately re-clicking into the same in-flight state.
                 await asyncio.sleep(3)
             if current_page == page_before:
-                logger.error(
-                    "  Next-page click stuck on page %d after 4 attempts — stopping "
-                    "(returning %d notices collected so far)", page_before, len(notices),
+                # Last resort before giving up: re-select the saved search and
+                # click through to the next page from a fresh results grid
+                # (2026-11-12 — a 20-page Jackson probate backfill stopped at
+                # page 3 of 20 here with no recovery attempt).
+                logger.warning(
+                    "  Next-page click stuck on page %d after 4 attempts — "
+                    "re-opening the search and jumping to page %d",
+                    page_before, page_before + 1,
                 )
-                advance_failed = True
+                try:
+                    recovered = await _recover_to_search_page(page, search, page_before + 1)
+                except Exception:
+                    logger.warning("  Recovery raised an error", exc_info=True)
+                    recovered = False
+                if recovered:
+                    current_page, total_pages = await _get_page_info(page)
+                if not recovered or current_page == page_before:
+                    logger.error(
+                        "  Next-page click stuck on page %d after 4 attempts and recovery — "
+                        "stopping (returning %d notices collected so far)",
+                        page_before, len(notices),
+                    )
+                    advance_failed = True
+                    if progress is not None:
+                        progress["resume_page"] = page_before + 1
             if advance_failed:
                 break
         else:
@@ -484,6 +568,8 @@ async def run_saved_search(
                     current_page, total_pages = await _get_page_info(page)
                     continue
                 logger.error("  Recovery failed — stopping after page %d", current_page)
+                if progress is not None:
+                    progress["resume_page"] = current_page + 1
             break
 
     logger.info("  Found %d notices for %s", len(notices), search.saved_search_name)
@@ -651,6 +737,12 @@ async def _scrape_results_page(
                 if not content_visible:
                     # Need to solve CAPTCHA
                     if not await solve_captcha_and_view(page):
+                        if await _is_access_blocked(page):
+                            logger.error(
+                                "  ACCESS BLOCKED by the notice site: \"You are not permitted to view "
+                                "public notices from this computer at this time.\" Stopping the run."
+                            )
+                            raise SiteAccessBlocked(page.url)
                         logger.warning("  CAPTCHA solve failed for result %d (attempt %d)", idx + 1, attempt)
                         # Track which IDs we lost to CAPTCHA failure so the next run
                         # can prioritize them and the end-of-run summary surfaces them.
@@ -719,6 +811,9 @@ async def _scrape_results_page(
                     await page.wait_for_load_state("networkidle")
                 await delay()
                 break  # Success — next result
+
+            except SiteAccessBlocked:
+                raise
 
             except PwTimeout:
                 logger.warning("  Timeout on result %d (attempt %d/%d)", idx + 1, attempt, MAX_RETRIES)
@@ -841,7 +936,10 @@ async def _recover_to_search_page(
             # Same explicit short timeout as the main pagination loop above
             # (added 2026-07-28) — fail fast on a stuck click during
             # recovery rather than inheriting the context's 60s default.
-            await next_btn.click(timeout=15_000)
+            try:
+                await next_btn.click(timeout=15_000)
+            except Exception:
+                await next_btn.evaluate("el => el.click()")
             await page.wait_for_load_state("load")
             await delay()
             await delay()
@@ -938,6 +1036,18 @@ def save_captcha_failed_ids(failed: dict[str, dict]) -> None:
 # ── Main Entry Point ─────────────────────────────────────────────────
 
 
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+# Each rotation = one fresh login; ~3 pages (150 notices) fit in one session.
+# Was 12 (enough for a 20-page backfill in one run), but ~500 notice views in
+# one evening got this computer blocked on 2026-11-12. Keep backfills to about
+# 3 pages per run/day and use --start-page to continue; 1 rotation is retry room.
+MAX_SESSION_ROTATIONS = 1
+
+
 async def scrape_all(
     mode: str = "daily",
     searches: list[SavedSearch] | None = None,
@@ -1027,13 +1137,7 @@ async def scrape_all(
             logger.info("Using proxy: %s:%s", parsed.hostname, parsed.port)
 
         browser = await p.chromium.launch(**launch_opts)
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-        )
+        context = await browser.new_context(user_agent=_USER_AGENT)
         # Generous timeout for ASP.NET postbacks + CAPTCHA solving
         context.set_default_timeout(60_000)
 
@@ -1059,13 +1163,80 @@ async def scrape_all(
 
             remaining = (max_notices - len(all_notices)) if max_notices else 0
             try:
+                progress: dict = {}
                 search_notices = await run_saved_search(
                     page, search, since_date, llm_api_key,
                     on_page_batch=on_batch, start_page=start_page,
                     max_notices=remaining, seen_ids=seen_ids,
-                    captcha_failed_ids=captcha_failed_ids,
+                    captcha_failed_ids=captcha_failed_ids, progress=progress,
                 )
                 all_notices.extend(search_notices)
+
+                # Session rotation (2026-11-12): the notice site stops rendering
+                # results after ~150 detail views per login session. When a search
+                # stops early, persist progress, open a brand-new browser context
+                # with a fresh login, and resume from the page it stopped on.
+                # seen_ids skips anything already scraped on that page.
+                rotations = 0
+                last_resume = start_page
+                while (
+                    progress.get("resume_page") and not progress.get("blocked")
+                    and rotations < MAX_SESSION_ROTATIONS
+                ):
+                    resume_page = progress["resume_page"]
+                    if resume_page < last_resume or (resume_page == last_resume and rotations):
+                        logger.error(
+                            "  No progress after a fresh session (still page %d) — giving up on %s",
+                            resume_page, search.saved_search_name,
+                        )
+                        break
+                    if max_notices and len(all_notices) >= max_notices:
+                        break
+                    rotations += 1
+                    last_resume = resume_page
+                    save_seen_ids(seen_ids)
+                    logger.warning(
+                        "  Rotating to a fresh login session (%d/%d) — resuming %s at page %d",
+                        rotations, MAX_SESSION_ROTATIONS, search.saved_search_name, resume_page,
+                    )
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+                    context = await browser.new_context(user_agent=_USER_AGENT)
+                    context.set_default_timeout(60_000)
+                    page = await context.new_page()
+                    if not await login(page):
+                        logger.error("  Fresh login failed during session rotation — stopping")
+                        break
+                    await _save_cookies(context)
+                    progress = {}
+                    remaining = (max_notices - len(all_notices)) if max_notices else 0
+                    more = await run_saved_search(
+                        page, search, since_date, llm_api_key,
+                        on_page_batch=on_batch, start_page=resume_page,
+                        max_notices=remaining, seen_ids=seen_ids,
+                        captcha_failed_ids=captcha_failed_ids, progress=progress,
+                    )
+                    all_notices.extend(more)
+                if progress.get("blocked"):
+                    logger.error(
+                        "Notice site blocked this computer — stopping all searches. "
+                        "Do not retry until access is restored."
+                    )
+                    break
+                if progress.get("resume_page"):
+                    logger.error(
+                        "  %s ended early at page %d after %d session rotations",
+                        search.saved_search_name, progress["resume_page"], rotations,
+                    )
+            except SiteAccessBlocked:
+                logger.error(
+                    "Notice site blocked this computer during %s — stopping all searches. "
+                    "Notices scraped before the block are kept. Do not retry until access is restored.",
+                    search.saved_search_name,
+                )
+                break
             except Exception:
                 logger.exception("Failed to scrape: %s", search.saved_search_name)
                 # Check if failure was due to session expiration and re-login

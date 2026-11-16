@@ -1293,6 +1293,12 @@ def cli_main() -> None:
         help="Override date cutoff (YYYY-MM-DD). Overrides daily/historical mode logic.",
     )
     parser.add_argument(
+        "--start-page",
+        type=int,
+        default=1,
+        help="Start each saved search at this results page (pages before it are paged past without opening any notice)",
+    )
+    parser.add_argument(
         "--max-notices",
         type=int,
         default=0,
@@ -2004,6 +2010,7 @@ def _run_scrape_pipeline(args, searches) -> None:
             since_date_override=args.since,
             max_notices=args.max_notices,
             headless=not args.headed,
+            start_page=args.start_page,
         ))
     # Handle async probate lookup before pipeline (requires asyncio.run)
     probate_notices = [n for n in notices if n.notice_type == "probate" and n.decedent_name and not n.address]
