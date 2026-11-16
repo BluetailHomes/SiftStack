@@ -107,6 +107,7 @@ jobs:
           REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           LIVE: ${{ vars.AM_START_LIVE }}
+          DRIP_SWAP_LIVE: ${{ vars.DRIP_SWAP_LIVE }}
         if: steps.guard.outputs.skip != 'true'
         run: |
           ARGS="am-start --slack --ready-file output/pm_texts/topup_ready_$(TZ=America/Chicago date +%F).json"

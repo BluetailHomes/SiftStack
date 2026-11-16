@@ -572,3 +572,33 @@ def test_pm_text_cap_goes_to_blitz_before_lane_b():
         to_send = pts.plan_pm_texts(models, "2026-11-09", "c", set())[0]
     sent = {e["uuid"] for e in to_send if not e["overflow"]}
     assert len(sent) == cap and not any(f"u{i}" in sent for i in range(5))
+
+
+def test_am_start_live_without_marker_still_restarts_drip_restart_records(tmp_path):
+    """No Friday marker: the new batch stays off, but a Drip Restart record (primary swapped to a
+    never-texted number) gets its full 5-day drip when DRIP_SWAP_LIVE is true."""
+    import drip_swap
+    api = FakeApi({"r1": _det(tags=(drip_swap.RESTART_TAG, "SMS Line A", "Priority 1"), status="prospecting")},
+                  tags=FakeApi.TAGS + [{"uuid": "t-restart", "title": drip_swap.RESTART_TAG}])
+    cap = {t: {"capacity": 5, "sent": 0, "running": 0, "started": 0} for t in pts.SMS_LINE_TAGS}
+    one_post = lambda a, u: a.call(f"/api/internal/property/{u}/status/", "POST", {"status": "prospecting"})  # noqa: E731
+    with patch.object(pts, "ct_now", return_value=MON_950), patch.object(pts, "_env", return_value="k"), \
+            patch.object(pts, "Sift", return_value=api), patch.object(pts, "STATE_DIR", tmp_path), \
+            patch.object(pts, "load_capacity", return_value=cap), patch.object(pts.time, "sleep"), \
+            patch.object(drip_swap, "swap_live", return_value=True), patch.object(drip_swap, "restart", one_post):
+        rc = pts.run_am_start(_args(ready_file=str(tmp_path / "missing.json")))
+    assert rc == 1  # still exits 1: the new batch did not launch
+    posts = [w for w in api.writes if w[2] == {"status": "prospecting"}]
+    assert [p[1] for p in posts] == ["/api/internal/property/r1/status/"]
+    assert any("remove-tags" in w[1] for w in api.writes)
+
+
+def test_am_start_live_without_marker_restarts_held_when_swap_not_live(tmp_path):
+    import drip_swap
+    api = FakeApi({"r1": _det(tags=(drip_swap.RESTART_TAG, "SMS Line A"), status="prospecting")},
+                  tags=FakeApi.TAGS + [{"uuid": "t-restart", "title": drip_swap.RESTART_TAG}])
+    with patch.object(pts, "ct_now", return_value=MON_950), patch.object(pts, "_env", return_value="k"), \
+            patch.object(pts, "Sift", return_value=api), patch.object(pts, "STATE_DIR", tmp_path), \
+            patch.object(drip_swap, "swap_live", return_value=False):
+        assert pts.run_am_start(_args(ready_file=str(tmp_path / "missing.json"))) == 1
+    assert api.writes == []

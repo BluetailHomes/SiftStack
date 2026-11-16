@@ -88,6 +88,7 @@ STATUS_MAP = {  # rulebook wording -> DataSift status key
 
 class DataSift:
     def __init__(self, key: str):
+        self.key = key
         self.h = {"authorization": f"Api-Key {key}", "content-type": "application/json"}
         self.s = {**self.h, "x-http-method-override": "GET"}
 
@@ -522,7 +523,7 @@ def handle(ds: DataSift, rules: str, ev: dict, mode: str, dry_run: bool, model: 
     if dnc_line:
         note += "\n" + dnc_line
         result["dnc"] = dnc_line
-    drip_line = stop_drip_if_needed(ds, pu, out, ctx["record"]["inbound_is_primary"])
+    drip_line = stop_drip_if_needed(ds, pu, out, ctx["record"]["inbound_is_primary"], own, inbound_number, d)
     if drip_line:
         note += "\n" + drip_line
         result["drip"] = drip_line
@@ -562,12 +563,21 @@ def mark_number_dnc_if_stop(ds: DataSift, owner: dict, number: str, out: dict) -
     return f"DNC: phone {number[-4:]} {old} -> {new}" if ok else f"DNC: FAILED to mark {number} {new}, mark it by hand"
 
 
-def stop_drip_if_needed(ds: DataSift, prop_uuid: str, out: dict, inbound_is_primary: bool) -> str:
+SWAP_CATEGORIES = {"wrong_number", "not_owner"}
+
+
+def stop_drip_if_needed(ds: DataSift, prop_uuid: str, out: dict, inbound_is_primary: bool,
+                        owner: dict | None = None, inbound_number: str = "", det: dict | None = None) -> str:
     """Remove the record from any running drip when the inbound comes from the number we drip.
     The drip texts only the primary phone, so ANY reply from it (whatever the category: a question,
     an interested owner, a not-the-owner, a STOP) ends the automated morning texts; a human takes it
     from there. A reply from any other number, STOP included, leaves the drip running: that number
     was never being texted, and a STOP from it only gets that number marked DNC.
+
+    Primary swap (2026-11-13, only when DRIP_SWAP_LIVE is "true"): a wrong_number / not_owner reply
+    from the primary marks that number WRONG and hands the drip to the next Dial First/Second mobile
+    (drip_swap.py): already texted -> it becomes primary and the drip keeps running; never texted ->
+    drip removed, tagged Drip Restart for Monday's full 5-day start; none -> drip removed as before.
     Returns a one-line summary, or "" if untouched."""
     cat = out.get("category")
     if not inbound_is_primary:
@@ -579,12 +589,41 @@ def stop_drip_if_needed(ds: DataSift, prop_uuid: str, out: dict, inbound_is_prim
         return "Drip: could not read drip history, check by hand"
     if not drips:
         return ""
+    if cat in SWAP_CATEGORIES and owner and inbound_number:
+        import drip_swap
+        if drip_swap.swap_live():
+            line = swap_drip(ds, prop_uuid, drips, owner, inbound_number, det, cat)
+            if line:
+                return line
     names = []
     for h in drips:
         ok = ds.remove_drip(h["history_uuid"])
         names.append(f"{h.get('name')}{'' if ok else ' (REMOVE FAILED)'}")
         log.info("%s drip %s for %s (%s)", "removed" if ok else "FAILED to remove", h.get("name"), prop_uuid, cat)
     return f"Drip: removed from {', '.join(names)} ({cat})"
+
+
+def swap_drip(ds: DataSift, prop_uuid: str, drips: list[dict], owner: dict, number: str,
+              det: dict | None, cat: str) -> str:
+    """Mark the replying primary WRONG, then let drip_swap move/restart/remove. "" = fall back to removal."""
+    import drip_swap
+    import pm_text_sender as pts
+    ph = next((p for p in owner.get("phones") or [] if digits(p.get("number")) == number), None)
+    mark = ""
+    if ph and owner.get("uuid") and (ph.get("status") or "") not in ("WRONG", "DEAD", "WRONG_DNC"):
+        try:
+            ok = ds.set_phone_status(owner["uuid"], ph, "WRONG")
+        except Exception as e:  # noqa: BLE001
+            log.warning("WRONG mark failed for %s: %s", number, e)
+            ok = False
+        mark = f"Phone {number[-4:]} -> WRONG. " if ok else f"FAILED to mark {number} WRONG, mark it by hand. "
+    try:
+        res = drip_swap.handle(pts.Sift(ds.key), prop_uuid, drips, f"replied {cat.replace('_', ' ')}",
+                               wrong=number, slack=False, note=False)
+    except Exception as e:  # noqa: BLE001
+        log.error("drip swap failed for %s, removing instead: %s", prop_uuid, e)
+        return ""
+    return mark + res["line"]
 
 
 def main() -> int:

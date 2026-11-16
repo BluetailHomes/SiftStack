@@ -1123,8 +1123,14 @@ def run_am_start(args) -> int:
         return 0
     api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
     marker, problem = load_ready_file(args.ready_file, batch_date)
-    problem = problem or review_tags_problem(api)
-    if live and problem:
+    review_problem = review_tags_problem(api)
+    if live and review_problem:
+        return _alert(args, f":x: Morning start {day}: NOT launched. {review_problem}. No record was changed.")
+    # A bad/missing Friday marker stops the new batch, but not the Drip Restart records (primary swapped
+    # to a never-texted number, drip_swap.py): those are already vetted P1 records that were mid-cadence.
+    import drip_swap
+    restarts_on = drip_swap.swap_live()
+    if live and problem and not restarts_on:
         return _alert(args, f":x: Morning start {day}: NOT launched. {problem}. No record was changed.")
     state_file = STATE_DIR / f"am_start_{day}.json"
     prior = json.loads(state_file.read_text(encoding="utf-8")).get("results", []) if state_file.exists() else []
@@ -1135,23 +1141,55 @@ def run_am_start(args) -> int:
     if marker and not problem:
         candidates, marker_lines = list(marker["uuids"]), marker.get("lines") or {}
         source = f"readiness marker ({len(candidates)} records)"
+    elif live:
+        candidates, marker_lines = [], None
+        source = f"NO new batch ({problem})"
     else:
         candidates, marker_lines = [r["uuid"] for r in api.search(_preset_must(api, PRESET_01_TITLE))], None
         source = f"preset 01 ({len(candidates)} records; dry run only: {problem})"
     ready, held, errors = plan_am_start(api, candidates, f"Batch {batch_date}", capacity, marker_lines)
+    left = {k: v["capacity"] for k, v in capacity.items()}
+    for e in ready:
+        left[e["line"]] -= 1
+    r_ready, r_held, r_errors = drip_swap.plan_restarts(api, left)
+    errors += r_errors
+    if live and not restarts_on and r_ready:
+        r_held += [{**e, "why": "DRIP_SWAP_LIVE is not true"} for e in r_ready]
+        r_ready = []
+    if live and problem and not r_ready:
+        return _alert(args, f":x: Morning start {day}: NOT launched. {problem}. No record was changed.")
     out = [f"Morning start for {day} ({'LIVE' if live else 'DRY RUN'}), Batch {batch_date}, from {source}: "
            f"{len(ready)} to set Prospecting, {len(held)} held back",
            "Line room: " + "; ".join(f"{k[4:]} sent {v['sent']}, running {v['running']}, started {v['started']} -> {v['capacity']}"
                                      for k, v in capacity.items())]
     out += [f"  START {e['street']} | {e['owner_first']} | {e['line']} | primary ...{e['primary'][-4:]}" for e in ready]
     out += [f"  HOLD  {e['street']} | {e['owner_first'] or '(no name)'} | {e['why']}" for e in held]
+    if problem and live:
+        out.insert(0, f":x: New batch NOT launched: {problem}. Drip Restart records only.")
+    if r_ready or r_held:
+        out.append(f"Drip restarts (primary swapped to a never-texted number): {len(r_ready)} to restart, {len(r_held)} held")
+        out += [f"  RESTART {e['street']} | {e['owner_first']} | {e['line']} | primary ...{e['primary'][-4:]}" for e in r_ready]
+        out += [f"  HOLD    {e['street']} | {e['owner_first'] or '(no name)'} | {e['why']}" for e in r_held]
     if errors:
         out.append(f":warning: {len(errors)} read errors (those records held): " + "; ".join(errors[:5]))
     results, rc = [], 1 if errors else 0
-    if live and ready:
+    if live:
+        for e in r_held:  # status moved on (New Lead, Not Interested...): the restart no longer applies
+            if e["why"].startswith(drip_swap.MOVED_ON):
+                try:
+                    drip_swap.untag(api, e["uuid"])
+                except RuntimeError as ex:
+                    errors.append(f"{e['street']}: untag {str(ex)[:80]}")
+    if live and (ready or r_ready):
         for e in ready:
             try:
                 api.call(f"/api/internal/property/{e['uuid']}/status/", "POST", {"status": "prospecting"})
+                results.append({**e, "ok": True})
+            except RuntimeError as ex:
+                results.append({**e, "ok": False, "err": str(ex)[:200]})
+        for e in r_ready:
+            try:
+                drip_swap.restart(api, e["uuid"])
                 results.append({**e, "ok": True})
             except RuntimeError as ex:
                 results.append({**e, "ok": False, "err": str(ex)[:200]})
@@ -1168,14 +1206,19 @@ def run_am_start(args) -> int:
             r["running_drips"] = len(running)
             if len(running) != 1:
                 no_drip.append(f"{r['street']} ({len(running)} running)")
+            elif r.get("restart"):
+                try:
+                    drip_swap.untag(api, r["uuid"])
+                except RuntimeError as ex:
+                    no_drip.append(f"{r['street']} (restarted, but {drip_swap.RESTART_TAG!r} tag not removed: {str(ex)[:60]})")
         fails = [r for r in results if not r["ok"]]
         out.append(f"Set Prospecting on {len(results) - len(fails)}; failed {len(fails)}" + "".join(f"\n  FAILED {r['street']}: {r['err']}" for r in fails))
         out.append(":white_check_mark: every started record has exactly one running drip" if not no_drip else ":warning: drip check: " + "; ".join(no_drip))
-        rc = 1 if (fails or no_drip or errors) else 0
+        rc = 1 if (fails or no_drip or errors or (problem and live)) else 0
     report = "\n".join(out)
     print(report)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps({"ready": ready, "blocked": held, "capacity": capacity, "results": prior + results},
+    state_file.write_text(json.dumps({"ready": ready + r_ready, "blocked": held + r_held, "capacity": capacity, "results": prior + results},
                                      indent=1, default=str), encoding="utf-8")
     if args.slack:
         _slack(report)

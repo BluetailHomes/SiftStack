@@ -175,8 +175,42 @@ def remove_history(key: str, history_uuid: str) -> bool:
     return r.status_code in (200, 204)
 
 
+PRIMARY_WRONG = "primary phone wrong/dead"
+PRIMARY_CLEARED = "primary phone cleared after a Wrong mark"
+
+
+def _swap_primary(key: str, r: dict, drips: list[dict], dry_run: bool, swap_on: bool, stats: dict) -> bool:
+    """Wrong/cleared primary with a running drip. Returns True when handled here; False means fall
+    through to the old remove-every-drip path (swap not live, or a 'remove' decision when live --
+    apply() removes those itself, so True there too)."""
+    import drip_swap
+    import pm_text_sender as pts
+    pu = r["uuid"]
+    try:
+        api = pts.Sift(key)
+        if not swap_on or dry_run:
+            d = drip_swap.preview(api, pu, det=r.get("_det"))
+            LOG.info("%s %s: would %s%s (%s)", "DRY RUN" if dry_run else "SWAP NOT LIVE", pu, d["action"],
+                     f" to ...{d['target'][-4:]}" if d["target"] else "", d["why"])
+            if swap_on and d["action"] != "remove":
+                stats["swapped" if d["action"] == "swap" else "restarts"] += 1
+                return True  # dry run of a live swap: don't also log a removal
+            return False
+        why = "was marked Wrong/Dead" if r["_reason"] == PRIMARY_WRONG else "was cleared after a Wrong mark"
+        res = drip_swap.handle(api, pu, drips, why, det=r.get("_det"))
+    except Exception as e:  # noqa: BLE001
+        LOG.error("swap failed for %s, removing the drip instead: %s", pu, e)
+        return False
+    key_ = {"swap": "swapped", "restart": "restarts", "remove": "removed"}[res["action"]]
+    stats[key_] += len(drips) if res["action"] == "remove" else 1
+    if not res["ok"]:
+        stats["failed"] += 1
+    return True
+
+
 def run(key: str, tags: list[str], dry_run: bool) -> dict:
-    stats = {"candidates": 0, "with_running_drip": 0, "removed": 0, "failed": 0, "unread": 0}
+    stats = {"candidates": 0, "with_running_drip": 0, "removed": 0, "failed": 0, "unread": 0,
+             "swapped": 0, "restarts": 0}
     tuuids = tag_uuids(key, tags)
     if not tuuids:
         LOG.error("No guard tags resolved; nothing to do.")
@@ -231,13 +265,22 @@ def run(key: str, tags: list[str], dry_run: bool) -> dict:
     except Exception as e:  # noqa: BLE001
         LOG.warning("wrong-phone search failed: %s", e)
         wrong = []
+    # Primary swap (2026-11-13, DRIP_SWAP_LIVE): instead of removing the drip, move the primary to
+    # the next Dial First/Second mobile (see drip_swap.py). DataSift may CLEAR the primary when it is
+    # marked Wrong; such a record still has a Wrong phone, so it is in this search too. A cleared
+    # primary is only acted on when the swap is live (the old guard never touched it).
+    import drip_swap
+    swap_on = drip_swap.swap_live()
     for r in wrong:
         if r["uuid"] in seen:
             continue
         try:
-            if primary_phone_is_wrong(key, r["uuid"]):
+            det = _get(key, f"/api/internal/property/{r['uuid']}/")
+            problem = drip_swap.primary_problem(det)
+            if problem == "wrong" or (problem == "cleared" and swap_on):
                 seen.add(r["uuid"])
-                r["_reason"] = "primary phone wrong/dead"
+                r["_reason"] = PRIMARY_WRONG if problem == "wrong" else PRIMARY_CLEARED
+                r["_det"] = det
                 rows.append(r)
         except Exception as e:  # noqa: BLE001
             LOG.warning("primary-phone check failed for %s: %s", r["uuid"], e)
@@ -258,6 +301,10 @@ def run(key: str, tags: list[str], dry_run: bool) -> dict:
         if not drips:
             continue
         stats["with_running_drip"] += 1
+        if r.get("_reason") in (PRIMARY_WRONG, PRIMARY_CLEARED):
+            if _swap_primary(key, r, drips, dry_run, swap_on, stats):
+                time.sleep(0.3)
+                continue
         for h in drips:
             label = f"{r.get('_reason') or r.get('status')} / {h.get('name')} / next={h.get('next_step')} in {h.get('next_in')}"
             if dry_run:
