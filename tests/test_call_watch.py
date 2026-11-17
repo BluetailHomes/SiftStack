@@ -137,3 +137,33 @@ def test_no_post_prints_only(monkeypatch, capsys):
     chat.assert_not_called()
     slack.assert_not_called()
     assert "CALL: Incoming call" in capsys.readouterr().out
+
+
+# ------------------------------------------------------- run_call_watch --state
+
+def _run_state(rows, now, monkeypatch, state):
+    monkeypatch.setenv("REISIFT_API_KEY", "x")
+    args = SimpleNamespace(day=None, window_min=6, no_post=False, state=str(state))
+    chat = MagicMock()
+    with patch.object(pts, "ct_now", return_value=now), \
+         patch.object(pts, "Sift", return_value=_api([rows])), \
+         patch.object(pts, "_google_chat", chat), patch.object(pts, "_slack", MagicMock()):
+        assert pts.run_call_watch(args) == 0
+    return chat.call_count
+
+
+def test_state_posts_call_a_skipped_run_missed_and_never_twice(monkeypatch, tmp_path):
+    state = tmp_path / "cw.json"
+    # 10:05 CT run: nothing yet.
+    assert _run_state([], NOW, monkeypatch, state) == 0
+    # Call ends 10:08 CT (15:08 UTC); the 10:10 run is skipped; the 10:25 run is 17 min later,
+    # outside the 6-min window, but the state looks back to 10:03.
+    rows = [_call("2026-10-26 15:08:00", ext="late")]
+    assert _run_state(rows, NOW + dt.timedelta(minutes=20), monkeypatch, state) == 1
+    # Overlapping next run sees the same call: not posted again.
+    assert _run_state(rows, NOW + dt.timedelta(minutes=25), monkeypatch, state) == 0
+
+
+def test_no_state_file_uses_window(monkeypatch, tmp_path):
+    rows = [_call("2026-10-26 14:50:00", ext="old")]   # 9:50 CT, outside the 6-min window
+    assert _run_state(rows, NOW, monkeypatch, tmp_path / "none.json") == 0

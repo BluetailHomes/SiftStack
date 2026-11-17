@@ -60,7 +60,9 @@ on:
 jobs:
   weekly-topup:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # 240, not 180: the 2026-11-13 run took 130 min (enrich 15 + apply 92 + validate 9) before the
+    # obituary steps, and the 0.7 s API floor (a1184f8) can stretch apply further.
+    timeout-minutes: 240
     concurrency:
       group: weekly-topup
       cancel-in-progress: false
@@ -92,7 +94,8 @@ jobs:
           python src/drip_exit_guard.py $ARGS
       - name: Enrich auto-added P1 records (dry run unless P1_ENRICH_LIVE is "true")
         continue-on-error: true
-        timeout-minutes: 15
+        # 25, not 15: enrich hit its 15-min cap on 2026-11-13 (records past the cap wait a week).
+        timeout-minutes: 25
         env:
           REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
           TRESTLE_API_KEY: ${{ secrets.TRESTLE_API_KEY }}
@@ -124,8 +127,22 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
           ARGS="validate --slack"
-          if [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 18:00-20:00"; fi
+          # Validate only reads, so its window runs to 23:59, not 20:00: it starts after apply
+          # (92 min on 11-13), i.e. near 20:00, and a skipped validate writes no marker, so
+          # Monday's am-start would launch nothing while this run still looked green.
+          if [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 18:00-23:59"; fi
           python src/weekly_topup.py $ARGS || echo "::warning::Monday's batch did not validate; am-start will launch nothing"
+      - name: Alert if no readiness marker was written
+        if: ${{ !cancelled() }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if ls output/pm_texts/topup_ready_*.json >/dev/null 2>&1; then echo "readiness marker written"; exit 0; fi
+          echo "::warning::no readiness marker written"
+          [ -n "$SLACK_WEBHOOK_URL" ] || exit 0
+          MSG=":warning: Weekly top-up wrote NO readiness marker for Monday, so am-start will launch nothing unless the top-up/validate is re-run (mode weekly-topup, gate off): $RUN_URL"
+          curl -s -X POST -H 'Content-Type: application/json' -d "{\"text\": \"$MSG\"}" "$SLACK_WEBHOOK_URL" || true
       - name: Obit age tags (plan only unless OBIT_AGE_LIVE is "true")
         if: ${{ !cancelled() }}
         continue-on-error: true
@@ -152,13 +169,23 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           LIVE: ${{ vars.OBIT_DP_LIVE }}
         run: |
-          if [ "${{ inputs.gate }}" = "true" ] && [ "$(python -c "import sys; sys.path.insert(0, 'src'); from pm_text_sender import _in_window; print(_in_window('18:00-20:00'))")" != "True" ]; then
-            echo "Outside 18:00-20:00 Central; skipping obituary DP"; exit 0
+          # 23:59, not 20:00: this step runs last, after validate, which itself can start near 20:00.
+          if [ "${{ inputs.gate }}" = "true" ] && [ "$(python -c "import sys; sys.path.insert(0, 'src'); from pm_text_sender import _in_window; print(_in_window('18:00-23:59'))")" != "True" ]; then
+            echo "Outside 18:00-23:59 Central; skipping obituary DP"; exit 0
           fi
           ARGS="--slack"
           if [ "$LIVE" = "true" ]; then ARGS="$ARGS --live"; fi
           echo "python src/obituary_dp.py $ARGS"
           python src/obituary_dp.py $ARGS
+      - name: Alert if the top-up was cancelled or timed out
+        if: cancelled()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -n "$SLACK_WEBHOOK_URL" ] || exit 0
+          MSG=":x: Weekly top-up was cancelled or timed out before it finished. Monday's batch may be partly written and may have no readiness marker: $RUN_URL"
+          curl -s -X POST -H 'Content-Type: application/json' -d "{\"text\": \"$MSG\"}" "$SLACK_WEBHOOK_URL" || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:

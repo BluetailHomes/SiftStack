@@ -138,7 +138,10 @@ jobs:
   pm-texts:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'pm-texts'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 45, not 20: the voicemail step alone took 18.8 min on 2026-11-13, and the run was cut off
+    # at 20 min on 11-12 and 11-16 (extra-texts never finished). The 0.7 s API floor (a1184f8)
+    # makes read-heavy steps slower still.
+    timeout-minutes: 45
     # Same once-per-day protection as am-start: the "already texted today" check in
     # pm_text_sender.py depends on DataSift logging API-sent texts (unverified), so a
     # second same-day run must not get as far as sending.
@@ -185,9 +188,22 @@ jobs:
         run: |
           ARGS="extra-texts --slack"
           if [ "$LIVE" = "true" ]; then ARGS="$ARGS --send"; fi
-          if [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 16:15-17:00"; fi
+          # Wider than the voicemail step's 16:15-17:00: this step starts only after the voicemail
+          # step finishes (18.8 min on 11-13), and its window is checked when it starts. Still ends
+          # well before the 7 PM texting cutoff.
+          if [ "${{ inputs.gate }}" = "true" ]; then ARGS="$ARGS --only-between 16:15-18:30"; fi
           echo "python src/pm_text_sender.py $ARGS"
           python src/pm_text_sender.py $ARGS
+      - name: Alert if the afternoon texts were cancelled or timed out
+        # A cancelled step never reaches the script's own Slack report (11-12 and 11-16 were silent).
+        if: cancelled()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -n "$SLACK_WEBHOOK_URL" ] || exit 0
+          MSG=":x: Afternoon voicemail/extra-number texts were cancelled or timed out before they finished. Some texts may not have gone out. Do NOT re-run blindly (double-text risk); check the run first: $RUN_URL"
+          curl -s -X POST -H 'Content-Type: application/json' -d "{\"text\": \"$MSG\"}" "$SLACK_WEBHOOK_URL" || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -200,7 +216,9 @@ jobs:
       github.event.schedule == '15 0 * * 2-6' || github.event.schedule == '15 1 * * 2-6'
       || (github.event_name == 'workflow_dispatch' && inputs.mode == 'audit')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 60, not 30: the 2026-11-16 audit hit 30.2 min and was cancelled (first run after the 0.7 s
+    # API floor in a1184f8; the Friday audit already took 26.4 min).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -26,7 +26,11 @@ What it does
    what the UI's "Remove from campaign" does; verified live 2026-10-16.
 
 Everything is idempotent and read-before-write; a record with no running
-drip costs one GET. It runs as the second step of the SMS auto-responder
+drip costs one GET. All calls go through pm_text_sender.Sift, which paces at
+DataSift's documented rate (2026-11-17; the guard used to call raw `requests`
+with no pacing and burned the shared 120/min budget every 5 minutes). With
+--state, a record recently found to have no running drip (or a fine primary
+phone) is skipped until its entry expires or its status changes; see _Cache. It runs as the second step of the SMS auto-responder
 job (.github/workflows/sms-auto-responder.yml), which the Cloudflare Worker in
 dispatcher/ starts every 5 minutes, 7:00 AM-10:55 PM Central. Its own GitHub
 cron (drip-exit-guard.yml, every 15 minutes) stays as a fallback; GitHub often
@@ -36,6 +40,8 @@ Usage
 -----
     python src/drip_exit_guard.py            # live
     python src/drip_exit_guard.py --dry-run  # report only
+
+    python src/drip_exit_guard.py --state output/watch_state/drip_guard.json
 
 Env: REISIFT_API_KEY (required). Optional: DRIP_GUARD_TAGS (comma list of tag
 titles whose records are guarded; default "Priority 1").
@@ -49,6 +55,7 @@ import logging
 import os
 import sys
 import time
+from pathlib import Path
 
 import requests
 
@@ -74,22 +81,21 @@ def _headers(key: str, override_get: bool = False) -> dict:
     return h
 
 
-def _get(key: str, path: str, retries: int = 6) -> dict | list:
-    # 429s got more common once the guard started running every 5 minutes next to
-    # the responder (2026-10-21): back off longer and honor Retry-After when sent.
-    for attempt in range(retries):
-        r = requests.get(API + path, headers=_headers(key), timeout=30)
-        if r.status_code == 200:
-            return r.json()
-        if r.status_code == 429:
-            try:
-                wait = float(r.headers.get("Retry-After", ""))
-            except ValueError:
-                wait = 5 * (attempt + 1)
-            time.sleep(min(max(wait, 1), 60))
-            continue
-        r.raise_for_status()
-    raise RuntimeError(f"GET {path} kept failing")
+_CLIENTS: dict = {}
+
+
+def _api(key: str):
+    """One rate-limited client per key for the whole run, so every call shares one pace."""
+    import pm_text_sender as pts
+    k = (key, pts.Sift)   # keyed on the class too, so a patched Sift (tests) gets its own client
+    if k not in _CLIENTS:
+        _CLIENTS[k] = pts.Sift(key)
+    return _CLIENTS[k]
+
+
+def _get(key: str, path: str) -> dict | list:
+    # pts.Sift retries 429s with adaptive backoff and raises RuntimeError on other errors.
+    return _api(key).call(path)
 
 
 def tag_uuids(key: str, titles: list[str]) -> list[str]:
@@ -103,27 +109,7 @@ def tag_uuids(key: str, titles: list[str]) -> list[str]:
 
 
 def search_records(key: str, must: dict, limit: int = 200) -> list[dict]:
-    out: list[dict] = []
-    offset = 0
-    while True:
-        body = {"limit": limit, "offset": offset, "query": {"must": must}}
-        for attempt in range(4):
-            r = requests.post(
-                API + "/api/internal/property/",
-                headers=_headers(key, override_get=True),
-                json=body,
-                timeout=60,
-            )
-            if r.status_code == 200:
-                break
-            time.sleep(3 * (attempt + 1))
-        r.raise_for_status()
-        d = r.json()
-        rows = d.get("data") or d.get("results") or []
-        out += rows
-        if not rows or len(out) >= int(d.get("count") or 0):
-            return out
-        offset += limit
+    return _api(key).search(must, limit)
 
 
 WRONG_PHONE_STATUSES = {"WRONG", "DEAD", "WRONG_DNC"}
@@ -149,7 +135,7 @@ def phone_stop_reason(key: str, property_uuid: str) -> str | None:
     """Why a record with a DNC-marked phone must leave its drip, or None to leave it running."""
     import pm_text_sender as pts
     try:
-        api = pts.Sift(key)
+        api = _api(key)
         det = api.call(f"/api/internal/property/{property_uuid}/")
         stop = pts.record_stop(api, property_uuid, det)
     except Exception as e:  # noqa: BLE001
@@ -167,12 +153,72 @@ def running_drips(key: str, property_uuid: str) -> list[dict]:
 
 
 def remove_history(key: str, history_uuid: str) -> bool:
-    r = requests.delete(
-        API + f"/api/internal/drip-campaign-history/{history_uuid}/",
-        headers=_headers(key),
-        timeout=30,
-    )
-    return r.status_code in (200, 204)
+    try:
+        _api(key).call(f"/api/internal/drip-campaign-history/{history_uuid}/", "DELETE")
+        return True
+    except Exception as e:  # noqa: BLE001
+        LOG.error("DELETE drip history %s failed: %s", history_uuid, e)
+        return False
+
+
+class _Cache:
+    """Negative results from recent runs, so the 5-minute guard stops re-reading the same records.
+
+    nodrip:   running_drips() found nothing for this record.
+    phone_ok: the record's DNC/Wrong phone did not make it a stop candidate.
+    Each entry stores the record's status at the time ("sig"); a status change makes it stale at
+    once. TTLs: 60 min for a closed (non-prospecting) status, whose drip can only restart through
+    a status change back to prospecting (sig changes); 10 min for prospecting/no status. A drip
+    sends at most one text a day, so a 10-60 minute recheck never lets a second text out. Positive
+    results are never cached. No path = no cache (the old behaviour)."""
+
+    CLOSED_TTL, OPEN_TTL, KEEP = 3600, 600, 86400
+
+    def __init__(self, path: str | None):
+        self.path = Path(path) if path else None
+        self.d: dict = {"nodrip": {}, "phone_ok": {}}
+        self.hits = 0
+        if self.path and self.path.exists():
+            try:
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                self.d = {k: dict(raw.get(k) or {}) for k in ("nodrip", "phone_ok")}
+            except Exception as e:  # noqa: BLE001
+                LOG.warning("guard state unreadable, starting fresh: %s", e)
+
+    @staticmethod
+    def _sig(r: dict) -> str:
+        return r.get("status") or ""
+
+    def _ttl(self, r: dict) -> int:
+        return self.OPEN_TTL if (r.get("status") or None) in ALLOWED_STATUSES else self.CLOSED_TTL
+
+    def fresh(self, kind: str, r: dict) -> bool:
+        if not self.path:
+            return False
+        e = self.d[kind].get(r["uuid"])
+        ok = bool(e) and e.get("sig") == self._sig(r) and time.time() - e.get("at", 0) < self._ttl(r)
+        self.hits += ok
+        return ok
+
+    def put(self, kind: str, r: dict) -> None:
+        if self.path:
+            self.d[kind][r["uuid"]] = {"sig": self._sig(r), "at": int(time.time())}
+
+    def drop(self, uuid: str) -> None:
+        for v in self.d.values():
+            v.pop(uuid, None)
+
+    def save(self) -> None:
+        if not self.path:
+            return
+        cut = time.time() - self.KEEP
+        for kind in self.d:
+            self.d[kind] = {u: e for u, e in self.d[kind].items() if e.get("at", 0) > cut}
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.d), encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            LOG.warning("could not save guard state: %s", e)
 
 
 PRIMARY_WRONG = "primary phone wrong/dead"
@@ -187,7 +233,7 @@ def _swap_primary(key: str, r: dict, drips: list[dict], dry_run: bool, swap_on: 
     import pm_text_sender as pts
     pu = r["uuid"]
     try:
-        api = pts.Sift(key)
+        api = _api(key)
         if not swap_on or dry_run:
             d = drip_swap.preview(api, pu, det=r.get("_det"))
             LOG.info("%s %s: would %s%s (%s)", "DRY RUN" if dry_run else "SWAP NOT LIVE", pu, d["action"],
@@ -208,9 +254,17 @@ def _swap_primary(key: str, r: dict, drips: list[dict], dry_run: bool, swap_on: 
     return True
 
 
-def run(key: str, tags: list[str], dry_run: bool) -> dict:
+def run(key: str, tags: list[str], dry_run: bool, state_path: str | None = None) -> dict:
+    cache = _Cache(state_path)
+    try:
+        return _run(key, tags, dry_run, cache)
+    finally:
+        cache.save()
+
+
+def _run(key: str, tags: list[str], dry_run: bool, cache: _Cache) -> dict:
     stats = {"candidates": 0, "with_running_drip": 0, "removed": 0, "failed": 0, "unread": 0,
-             "swapped": 0, "restarts": 0}
+             "swapped": 0, "restarts": 0, "cached": 0}
     tuuids = tag_uuids(key, tags)
     if not tuuids:
         LOG.error("No guard tags resolved; nothing to do.")
@@ -244,8 +298,11 @@ def run(key: str, tags: list[str], dry_run: bool) -> dict:
                 if r["uuid"] in seen:
                     continue
                 if "any_phone_status" in extra:
+                    if cache.fresh("nodrip", r) or cache.fresh("phone_ok", r):
+                        continue
                     why = phone_stop_reason(key, r["uuid"])
                     if not why:
+                        cache.put("phone_ok", r)
                         continue
                     r["_reason"] = why
                 else:
@@ -274,6 +331,8 @@ def run(key: str, tags: list[str], dry_run: bool) -> dict:
     for r in wrong:
         if r["uuid"] in seen:
             continue
+        if cache.fresh("nodrip", r) or cache.fresh("phone_ok", r):
+            continue
         try:
             det = _get(key, f"/api/internal/property/{r['uuid']}/")
             problem = drip_swap.primary_problem(det)
@@ -282,14 +341,17 @@ def run(key: str, tags: list[str], dry_run: bool) -> dict:
                 r["_reason"] = PRIMARY_WRONG if problem == "wrong" else PRIMARY_CLEARED
                 r["_det"] = det
                 rows.append(r)
+            else:
+                cache.put("phone_ok", r)
         except Exception as e:  # noqa: BLE001
             LOG.warning("primary-phone check failed for %s: %s", r["uuid"], e)
-        time.sleep(0.2)
     stats["candidates"] = len(rows)
     LOG.info("%d candidates after adding DNC/opt-out and wrong-primary-phone records", len(rows))
 
     for r in rows:
         pu = r["uuid"]
+        if cache.fresh("nodrip", r):
+            continue
         try:
             drips = running_drips(key, pu)
         except Exception as e:  # noqa: BLE001
@@ -299,11 +361,12 @@ def run(key: str, tags: list[str], dry_run: bool) -> dict:
             stats["unread"] += 1
             continue
         if not drips:
+            cache.put("nodrip", r)
             continue
+        cache.drop(pu)
         stats["with_running_drip"] += 1
         if r.get("_reason") in (PRIMARY_WRONG, PRIMARY_CLEARED):
             if _swap_primary(key, r, drips, dry_run, swap_on, stats):
-                time.sleep(0.3)
                 continue
         for h in drips:
             label = f"{r.get('_reason') or r.get('status')} / {h.get('name')} / next={h.get('next_step')} in {h.get('next_in')}"
@@ -316,7 +379,7 @@ def run(key: str, tags: list[str], dry_run: bool) -> dict:
             else:
                 stats["failed"] += 1
                 LOG.error("Failed to remove %s (%s)", pu, label)
-        time.sleep(0.3)
+    stats["cached"] = cache.hits
     return stats
 
 
@@ -428,6 +491,7 @@ def main() -> int:
                     help="Friday prep: classify P1 drips; report only unless --live")
     ap.add_argument("--live", action="store_true", help="with --friday: remove weekend-bound drips")
     ap.add_argument("--slack", action="store_true", help="with --friday: post the report to Slack")
+    ap.add_argument("--state", help="JSON file that remembers recent no-drip / phone-ok checks between runs")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
@@ -443,7 +507,7 @@ def main() -> int:
         LOG.info("Done: %s", stats)
         return 1 if stats["failed"] else 0
     tags = [t.strip() for t in a.tags.split(",") if t.strip()]
-    stats = run(key, tags, a.dry_run)
+    stats = run(key, tags, a.dry_run, a.state)
     LOG.info("Done: %s", stats)
     return 1 if stats["failed"] else 0
 

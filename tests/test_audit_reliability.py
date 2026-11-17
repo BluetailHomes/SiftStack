@@ -271,7 +271,7 @@ def test_workflow_audit_reliability_wiring():
     crons = [c["cron"] for c in on["schedule"]]
     assert "15 0 * * 2-6" in crons and "15 1 * * 2-6" in crons  # 7:15 PM schedule unchanged
     audit = wf["jobs"]["audit"]
-    assert audit["timeout-minutes"] == 30
+    assert audit["timeout-minutes"] == 60   # widened from 30 on 2026-11-17
     run = next(s["run"] for s in audit["steps"] if s.get("name") == "End-of-day caller audit")
     assert '--alert-skip' in run and 'inputs.gate }}" = "true"' in run
     alert = next(s for s in audit["steps"] if s.get("name") == "Alert on audit failure or timeout")

@@ -1514,8 +1514,34 @@ def _google_chat(text: str) -> None:
         print(f"(Google Chat post failed: {e})")
 
 
+def _load_watch_state(path) -> dict:
+    if not path:
+        return {}
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception as e:  # noqa: BLE001
+        print(f"(watch state {path} unreadable, ignoring: {e})")
+        return {}
+
+
+def _save_watch_state(path, state: dict) -> None:
+    if not path:
+        return
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(json.dumps(state, default=str), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        print(f"(could not save watch state {path}: {e})")
+
+
 def run_line_watch(args) -> int:
+    """With --state (2026-11-17), remembers the highest level alerted per line today, so a skipped
+    or late run still alerts once (at the current level) instead of missing the crossing. Without
+    state, or on the first stateful run of a day, it falls back to the last-N-minutes window."""
     now = ct_now()
+    state_path = getattr(args, "state", None)
     if args.day:
         day = dt.date.fromisoformat(args.day)
         now = dt.datetime.combine(day, dt.time(23, 59, 59), tzinfo=now.tzinfo)
@@ -1530,15 +1556,30 @@ def run_line_watch(args) -> int:
         print(f"  {fmt_phone(line)}  {n}")
     if not total:
         print("  (none)")
+    st = {} if args.day else _load_watch_state(state_path)
+    alerted = st.get("alerted") if st.get("day") == day.isoformat() else None
     alerts = []
     for line, n in total.most_common():
-        for t in line_crossings(upto[line], n, args.threshold, LINE_ALERT_STEP):
+        if alerted is not None:
+            # Stateful: everything up to the level already alerted is handled; alert only the
+            # highest new level, so a run after a gap posts one line, not 20, 25, 30, ...
+            crossed = line_crossings(int(alerted.get(line, 0)), n, args.threshold, LINE_ALERT_STEP)[-1:]
+        else:
+            crossed = line_crossings(upto[line], n, args.threshold, LINE_ALERT_STEP)
+        for t in crossed:
             alerts.append(f"Line {fmt_phone(line)} has sent {t} texts today — stop texting from it.")
     for a in alerts:
         print("ALERT: " + a)
         if not args.no_post:
             _google_chat(a)
             _slack(a)
+    if state_path and not args.day and not args.no_post:
+        new = dict(alerted or {})
+        for line, n in total.items():
+            levels = line_crossings(0, n, args.threshold, LINE_ALERT_STEP)
+            if levels:
+                new[line] = max(int(new.get(line, 0)), levels[-1])
+        _save_watch_state(state_path, {"day": day.isoformat(), "alerted": new})
     return 0
 
 
@@ -1575,7 +1616,7 @@ def group_inbound_calls(events: list[dict]) -> list[dict]:
         t = to_ct(e.get("timestamp"))
         if not key or t is None:
             continue
-        g = calls.setdefault(key, {"caller": caller, "line": line, "first": t, "last": t, "names": [],
+        g = calls.setdefault(key, {"key": key, "caller": caller, "line": line, "first": t, "last": t, "names": [],
                                    "duration": 0, "recording": None, "missed": False, "final": False})
         g["first"] = min(g["first"], t)
         g["last"] = max(g["last"], t)
@@ -1626,20 +1667,40 @@ def fetch_events_since(api: "Sift", cutoff: dt.datetime) -> list[dict]:
             return out
 
 
+CALL_WATCH_OVERLAP_MIN, CALL_WATCH_MAX_BACK_H, CALL_WATCH_KEEP_H = 2, 12, 24
+
+
 def run_call_watch(args) -> int:
     """Post every inbound call to our lines (missed, answered or voicemail) to Google Chat
-    and Slack. No saved state: each run reports calls whose final (missed/answered) event
-    landed in the last window, so a call posts once, after DataSift has its outcome."""
+    and Slack, once, after DataSift has its outcome (the call's final missed/answered event).
+
+    Without --state, each run reports calls whose final event landed in the last window
+    (--window-min). With --state (2026-11-17), it looks back to the previous run (minus a
+    2-minute overlap, at most 12 hours) and skips calls already posted, so a skipped or late
+    dispatcher run no longer loses calls and the overlap no longer double-posts one. Calls
+    overnight (the dispatcher stops at 10:55 PM) post with the first run next morning."""
     now = ct_now()
+    state_path = None if args.day else getattr(args, "state", None)
+    st = _load_watch_state(state_path)
+    posted: dict = dict(st.get("posted") or {})
     if args.day:
         day = dt.date.fromisoformat(args.day)
         now = dt.datetime.combine(day, dt.time(23, 59, 59), tzinfo=now.tzinfo)
         cutoff = dt.datetime.combine(day, dt.time(0, 0), tzinfo=now.tzinfo)
     else:
         cutoff = now - dt.timedelta(minutes=args.window_min)
+        try:
+            last = dt.datetime.fromisoformat(st["last_run"]) if st.get("last_run") else None
+        except ValueError:
+            last = None
+        if last is not None:
+            last = last.replace(tzinfo=now.tzinfo) if last.tzinfo is None else last.astimezone(now.tzinfo)
+            cutoff = max(min(cutoff, last - dt.timedelta(minutes=CALL_WATCH_OVERLAP_MIN)),
+                         now - dt.timedelta(hours=CALL_WATCH_MAX_BACK_H))
     api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
     calls = [g for g in group_inbound_calls(fetch_events_since(api, cutoff))
-             if g["final"] and cutoff.replace(tzinfo=None) < g["last"].replace(tzinfo=None) <= now.replace(tzinfo=None)]
+             if g["final"] and g.get("key") not in posted
+             and cutoff.replace(tzinfo=None) < g["last"].replace(tzinfo=None) <= now.replace(tzinfo=None)]
     print(f"call-watch: {len(calls)} inbound call(s) since {cutoff:%Y-%m-%d %H:%M} CT")
     for g in calls:
         msg = call_message(g)
@@ -1647,6 +1708,19 @@ def run_call_watch(args) -> int:
         if not args.no_post:
             _google_chat(msg)
             _slack(msg)
+            posted[g["key"]] = now.isoformat()
+    if state_path and not args.no_post:
+        keep = now - dt.timedelta(hours=CALL_WATCH_KEEP_H)
+
+        def _recent(v):
+            try:
+                t = dt.datetime.fromisoformat(v)
+                t = t.replace(tzinfo=now.tzinfo) if t.tzinfo is None else t
+                return t > keep
+            except (TypeError, ValueError):
+                return False
+        _save_watch_state(state_path, {"last_run": now.isoformat(),
+                                       "posted": {k: v for k, v in posted.items() if _recent(v)}})
     return 0
 
 
@@ -1692,11 +1766,13 @@ def main() -> int:
     w.add_argument("--window-min", type=int, default=5, help="only alert on crossings in the last N minutes")
     w.add_argument("--threshold", type=int, default=LINE_ALERT_AT)
     w.add_argument("--no-post", action="store_true", help="print only, don't post")
+    w.add_argument("--state", help="JSON file remembering the levels already alerted today")
     w.set_defaults(fn=run_line_watch)
     cw = sub.add_parser("call-watch", help="post inbound calls/voicemails on our lines to Google Chat + Slack")
     cw.add_argument("--day", help="YYYY-MM-DD: report every inbound call that day (backtest)")
     cw.add_argument("--window-min", type=int, default=6, help="report calls that started in the last N minutes")
     cw.add_argument("--no-post", action="store_true", help="print only, don't post")
+    cw.add_argument("--state", help="JSON file remembering the last run and the calls already posted")
     cw.set_defaults(fn=run_call_watch)
     args = ap.parse_args()
     return args.fn(args)

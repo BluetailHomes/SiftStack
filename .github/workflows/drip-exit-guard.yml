@@ -6,7 +6,7 @@ name: Drip Exit Guard
 # status change (both confirmed live 2026-10-16) — see
 # src/drip_exit_guard.py for the full reasoning.
 #
-# Schedule: every 15 minutes, 13:00-01:45 UTC = 8:00 AM - 8:45 PM
+# Schedule: hourly, 13:00-01:00 UTC = 8:00 AM - 8:00 PM
 # America/Chicago (CDT, UTC-5), Monday-Friday plus the UTC spill-over into
 # Saturday for the late-evening Friday slots. DataSift only sends drips
 # 8 AM - 9 PM, so this covers the whole sending window. GitHub may run
@@ -17,11 +17,16 @@ name: Drip Exit Guard
 # Since 2026-10-21 the guard also runs as a step of the SMS auto-responder job,
 # which the Cloudflare Worker (dispatcher/) starts every 5 minutes on time.
 # This cron is now only the fallback; the guard is idempotent.
+#
+# Hourly since 2026-11-17 (was every 15 min): the every-15 fallback added a full
+# uncached guard pass on top of the 5-minute responder runs, all sharing
+# DataSift's 120/min budget with am-start and the top-up. Hourly still catches
+# anything if the dispatcher stops.
 
 on:
   schedule:
-    - cron: '*/15 13-23 * * 1-5'
-    - cron: '*/15 0-1 * * 2-6'
+    - cron: '0 13-23 * * 1-5'
+    - cron: '0 0-1 * * 2-6'
   workflow_dispatch: {}
 
 jobs:

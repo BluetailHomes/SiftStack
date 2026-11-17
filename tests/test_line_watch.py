@@ -114,3 +114,37 @@ def test_backtest_day_reports_every_crossing(monkeypatch):
     rows = [_sent(LINE_A, "2026-10-22 15:00:00") for _ in range(26)]
     chat, _ = _run(rows, dt.datetime(2026, 10, 23, 9, 0), monkeypatch, day="2026-10-22")
     assert [c.args[0].split(" has sent ")[1].split(" ")[0] for c in chat.call_args_list] == ["20", "25"]
+
+
+# ------------------------------------------------------- run_line_watch --state
+
+def _run_state(rows, now, monkeypatch, state):
+    monkeypatch.setenv("REISIFT_API_KEY", "x")
+    args = SimpleNamespace(day=None, window_min=5, threshold=pts.LINE_ALERT_AT, no_post=False, state=str(state))
+    chat = MagicMock()
+    with patch.object(pts, "ct_now", return_value=now), \
+         patch.object(pts, "Sift", return_value=_api([rows])), \
+         patch.object(pts, "_google_chat", chat), patch.object(pts, "_slack", MagicMock()):
+        assert pts.run_line_watch(args) == 0
+    return [c.args[0].split(" has sent ")[1].split(" ")[0] for c in chat.call_args_list]
+
+
+def test_state_catches_crossing_a_skipped_run_missed(monkeypatch, tmp_path):
+    state = tmp_path / "lw.json"
+    now = dt.datetime(2026, 10, 22, 16, 30)
+    # First run of the day: 10 sends, nothing to alert, but the state now marks the day.
+    assert _run_state([_sent(LINE_A, "2026-10-22 15:00:00")] * 10, now, monkeypatch, state) == []
+    # Next run is 40 min late; line A went from 10 to 27 long before the 5-min window.
+    rows = [_sent(LINE_A, "2026-10-22 15:00:00")] * 27
+    assert _run_state(rows, now + dt.timedelta(minutes=40), monkeypatch, state) == ["25"]
+    # Same count again: no repeat.
+    assert _run_state(rows, now + dt.timedelta(minutes=45), monkeypatch, state) == []
+    # 30 crossed: one new alert.
+    rows30 = rows + [_sent(LINE_A, "2026-10-22 22:00:00")] * 3
+    assert _run_state(rows30, now + dt.timedelta(minutes=50), monkeypatch, state) == ["30"]
+
+
+def test_state_from_yesterday_falls_back_to_window(monkeypatch, tmp_path):
+    state = tmp_path / "lw.json"
+    state.write_text('{"day": "2026-10-21", "alerted": {"%s": 30}}' % LINE_A)
+    assert _run_state(_twenty("2026-10-22 21:28:00"), dt.datetime(2026, 10, 22, 16, 30), monkeypatch, state) == ["20"]
