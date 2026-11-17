@@ -49,23 +49,50 @@ function jobsForNow(now) {
   });
 }
 
-async function dispatch(env, job) {
+// Retry transient failures (network error, 429, 5xx) up to DISPATCH_ATTEMPTS times with
+// backoff (added 2026-11-17). A 4xx such as 401/403/422 is permanent and alerts at once.
+// A retry after a 5xx that GitHub actually accepted can start a job twice; that is safe:
+// pm-text-sender.yml has its once-per-day guard (src/workflow_run_guard.py), weekly-topup
+// refuses when Monday's Batch tag exists, and the responder/watches are idempotent.
+const DISPATCH_ATTEMPTS = 3;
+const RETRY_DELAYS_MS = [3000, 10000];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function dispatchOnce(env, job) {
   const workflow = job.workflow || env.WORKFLOW_FILE;
   const url = `https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/${workflow}/dispatches`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${env.GITHUB_TOKEN}`,
-      "Accept": "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "siftstack-dispatcher",
-      "Content-Type": "application/json",
-    },
-    // gate=true tells the workflow to apply the same Central time window the
-    // schedule path uses, so a queued/late dispatch can never text at dinner time.
-    body: JSON.stringify({ ref: env.GITHUB_REF, inputs: job.inputs || { mode: job.mode, gate: "true" } }),
-  });
-  return { ok: res.status === 204, status: res.status, body: res.ok ? "" : await res.text() };
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.GITHUB_TOKEN}`,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "siftstack-dispatcher",
+        "Content-Type": "application/json",
+      },
+      // gate=true tells the workflow to apply the same Central time window the
+      // schedule path uses, so a queued/late dispatch can never text at dinner time.
+      body: JSON.stringify({ ref: env.GITHUB_REF, inputs: job.inputs || { mode: job.mode, gate: "true" } }),
+    });
+    return { ok: res.status === 204, status: res.status, body: res.ok ? "" : await res.text() };
+  } catch (e) {
+    return { ok: false, status: 0, body: `network error: ${e && e.message ? e.message : e}` };
+  }
+}
+
+const transient = (status) => status === 0 || status === 429 || status >= 500;
+
+async function dispatch(env, job) {
+  let r;
+  for (let attempt = 1; attempt <= DISPATCH_ATTEMPTS; attempt++) {
+    r = await dispatchOnce(env, job);
+    r.attempts = attempt;
+    if (r.ok || !transient(r.status) || attempt === DISPATCH_ATTEMPTS) return r;
+    console.warn(`dispatch ${job.mode} attempt ${attempt} failed: HTTP ${r.status} ${r.body.slice(0, 200)}; retrying`);
+    await sleep(RETRY_DELAYS_MS[attempt - 1]);
+  }
+  return r;
 }
 
 async function slack(env, text) {
@@ -92,9 +119,9 @@ export default {
     }
     for (const job of jobs) {
       const r = await dispatch(env, job);
-      if (r.ok) { console.log(`dispatched ${job.mode} at ${stamp}`); continue; }
+      if (r.ok) { console.log(`dispatched ${job.mode} at ${stamp}${r.attempts > 1 ? ` (attempt ${r.attempts})` : ""}`); continue; }
       console.error(`dispatch ${job.mode} failed: HTTP ${r.status} ${r.body}`);
-      ctx.waitUntil(slack(env, `:x: siftstack-dispatcher could not start *${job.mode}* at ${stamp}: GitHub returned HTTP ${r.status} ${r.body.slice(0, 200)}. Fallback: run it by hand (GitHub Actions -> the workflow -> Run workflow).`));
+      ctx.waitUntil(slack(env, `:x: siftstack-dispatcher could not start *${job.mode}* at ${stamp}: GitHub returned HTTP ${r.status} ${r.body.slice(0, 200)} (after ${r.attempts} attempt(s)). Fallback: run it by hand (GitHub Actions -> the workflow -> Run workflow).`));
     }
   },
 
