@@ -118,4 +118,5 @@ Moved verbatim from this file on 2026-10-27. Read the relevant one before changi
 | `deep-prospecting-ty-sop.md` | Ty/Tyler's obituary + probate deep-prospecting SOP (Oct 13–29 workshop) vs our deep-prospecting-v5 tooling; gaps and open decisions |
 | `skill-library.md` | DataSift's 27-skill plugin library, `bluetail-*` skills, historical notes |
 | `two-lane-marketing-map.md` | PAPER DESIGN (2026-11-07): Lane A blitz + Lane B bulk SMS → power dialer → mail; proposed Bulk tags/presets, code touch points, open decisions |
+| `reach-expansion-plan.md` | READ-ONLY PLAN (2026-11-13): 6 ways to reach more P1 within Rahaf's capacity — primary rotate, VM drop, score-based lane split, Lane B bulk, mail; build order + decisions |
 | `../OK_KS_SCRAPER_FEASIBILITY.md`, `../sms_reply_rules.md` | Pre-existing docs |

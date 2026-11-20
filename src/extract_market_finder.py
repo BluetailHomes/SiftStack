@@ -652,42 +652,53 @@ async def _switch_view(page, view_name: str) -> bool:
     try:
         # Find the view toggle in the top bar (y < 150, x > 500)
         select_value = page.locator('[class*="SelectValue"]')
-        for i in range(await select_value.count()):
+        n = await select_value.count()
+        candidates = []
+        for i in range(n):
             el = select_value.nth(i)
             bbox = await el.bounding_box()
             if bbox and bbox["y"] < 150 and bbox["x"] > 500:
-                current_text = (await el.inner_text()).strip()
-                logger.info("View toggle shows '%s', requested '%s'", current_text, view_name)
+                candidates.append(el)
+        if not candidates:
+            # Fallback: layout shifted — match the toggle by its label text instead
+            for i in range(n):
+                el = select_value.nth(i)
+                txt = (await el.inner_text()).strip()
+                if txt in ("ZIP Codes", "Neighborhoods"):
+                    candidates.append(el)
+        for el in candidates:
+            current_text = (await el.inner_text()).strip()
+            logger.info("View toggle shows '%s', requested '%s'", current_text, view_name)
 
-                # Already on the requested view — do nothing
-                if view_name in current_text:
-                    logger.info("Already on %s view — no switch needed", view_name)
-                    return True
+            # Already on the requested view — do nothing
+            if view_name in current_text:
+                logger.info("Already on %s view — no switch needed", view_name)
+                return True
 
-                # Need to switch — open dropdown and click the target option
-                await el.click(force=True)
-                await page.wait_for_timeout(1000)
+            # Need to switch — open dropdown and click the target option
+            await el.click(force=True)
+            await page.wait_for_timeout(1000)
 
-                # Click the target option
-                option = page.locator(f'[class*="SelectOption"]:has-text("{view_name}")')
-                if await option.count() > 0:
-                    await option.first.click(force=True)
-                    await page.wait_for_timeout(3000)
-                    logger.info("Switched to %s view", view_name)
-                    return True
+            # Click the target option
+            option = page.locator(f'[class*="SelectOption"]:has-text("{view_name}")')
+            if await option.count() > 0:
+                await option.first.click(force=True)
+                await page.wait_for_timeout(3000)
+                logger.info("Switched to %s view", view_name)
+                return True
 
-                # Fallback: text match
-                option = page.get_by_text(view_name, exact=True)
-                if await option.count() > 0:
-                    await option.first.click(force=True)
-                    await page.wait_for_timeout(3000)
-                    logger.info("Switched to %s view via text click", view_name)
-                    return True
+            # Fallback: text match
+            option = page.get_by_text(view_name, exact=True)
+            if await option.count() > 0:
+                await option.first.click(force=True)
+                await page.wait_for_timeout(3000)
+                logger.info("Switched to %s view via text click", view_name)
+                return True
 
-                # Close dropdown without selecting
-                await page.keyboard.press("Escape")
-                logger.warning("Could not find '%s' option in dropdown", view_name)
-                return False
+            # Close dropdown without selecting
+            await page.keyboard.press("Escape")
+            logger.warning("Could not find '%s' option in dropdown", view_name)
+            return False
 
         logger.warning("View toggle not found in top bar")
         return False

@@ -207,7 +207,7 @@ def load_followups(api, caller: str, today: dt.date) -> dict:
 # A mistake is fixed by a NEW note (OFFER line + a "CORRECTION" line) that replaces the offer
 # note just before it on that property. Both stay in DataSift, and the correction is judged at
 # the original's time, so a later approval never authorizes an earlier offer.
-OFFER_DAY_GOAL, OFFER_WEEK_GOAL = 10, 50
+OFFER_WEEK_GOAL = 10    # Kaycie 2026-11-05: at least 10 offers a week; no daily goal, the day line shows the count only
 OFFERS_TRACKED_FROM = dt.date(2026, 10, 30)    # first day of structured capture; earlier = "Not tracked"
 REVIEW_LOOKBACK_DAYS = 14                      # open review items are re-listed this long
 REVIEW = ("malformed", "not_kaycie", "unverified", "send_unconfirmed", "voicemail_unverified", "followup_new_price")
@@ -506,7 +506,7 @@ def _offer_lines(o: dict, day: dt.date, today: dt.date | None = None) -> list[st
     week_label = "Week final" if day.weekday() == 4 else "Week to date"
     week = (f"*{w['offers']}* (partial week: tracking began {_d(o['from'])}, so not compared to {OFFER_WEEK_GOAL})"
             if o["partial_week"] else f"*{w['offers']} / {OFFER_WEEK_GOAL}*")
-    lines = [head, f"• {_d(day)}: *{d['offers']} / {OFFER_DAY_GOAL}* · {week_label}: {week}",
+    lines = [head, f"• {_d(day)}: *{d['offers']}* · {week_label}: {week}",
              f"• Initial {d['initial']} · Revised {d['revised']} · Live call {d['live']} · Text {d['texts']} · Written {d['written']} · "
              f"Properties {d['properties']} (week: {w['properties']})"]
     if w["voicemails"]:

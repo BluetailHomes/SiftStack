@@ -73,6 +73,19 @@ def _clean_name(name: str) -> str:
     return re.sub(r"\s+", " ", name).strip()
 
 
+_ENTITY_RE = re.compile(
+    r"\b(inc|incorporated|llc|l\.l\.c|corp|corporation|co|company|companies|ltd|lp|llp|"
+    r"trust|trustee|trustees|bank|church|association|assn|partners|partnership|"
+    r"properties|holdings|investments|group|enterprises|ministries|foundation|fund)\b\.?",
+    re.I,
+)
+
+
+def _is_entity_owner(owner: str) -> bool:
+    """True for company/trust owners: "Albert F Cornell Inc" is not the decedent Albert F Cornell."""
+    return bool(_ENTITY_RE.search(owner or ""))
+
+
 def name_variants(name: str) -> list[str]:
     """Search strings for a decedent name, most specific first: full, First Last, Last First."""
     full = _clean_name(name)
@@ -93,9 +106,13 @@ class SiftMap:
         self.timeout = timeout
 
     def _call(self, method: str, path: str, body: dict | None = None) -> dict:
-        for attempt in range(4):
+        for attempt in range(5):
             r = self.session.request(method, MAP + path, json=body, timeout=self.timeout)
-            if r.status_code == 429 and attempt < 3:
+            # 401 too: the 2026-11-12 Jackson backfill got a burst of ~22 401s on
+            # the first Step 3c lookups, then the same key worked — transient on
+            # SiftMap's side, so back off and retry rather than lose the lookup.
+            if r.status_code in (401, 429, 502, 503, 504) and attempt < 4:
+                logger.debug("    SiftMap %s on %s — retry %d", r.status_code, path, attempt + 1)
                 time.sleep(5 * (attempt + 1))
                 continue
             r.raise_for_status()
@@ -173,7 +190,8 @@ def probate_property_lookup_siftmap(notices, county: str = "Jackson", state: str
         surname = (_clean_name(n.decedent_name).split() or [""])[-1].lower()
         try:
             hits = [h for h in sm.lookup_owner(n.decedent_name, county, state)
-                    if surname and surname in _clean_name(h["owner"]).lower().split()]
+                    if surname and surname in _clean_name(h["owner"]).lower().split()
+                    and not _is_entity_owner(h["owner"])]
         except requests.RequestException as e:
             logger.warning("    SiftMap owner lookup failed for %s: %s", n.decedent_name, e)
             continue

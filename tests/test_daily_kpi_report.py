@@ -484,7 +484,7 @@ def test_summary_states_zero_unavailable_not_tracked():
     assert nt["state"] == "not_tracked" and "Not tracked yet" in text and "0 /" not in text
     z = r.summarize_offers(offers_of([]), dt.date(2026, 11, 3), tracked_from=start)
     assert z["state"] == "ok" and not z["partial_week"]
-    assert "Tue Nov 3: *0 / 10* · Week to date: *0 / 50*" in "\n".join(r._offer_lines(z, dt.date(2026, 11, 3)))
+    assert "Tue Nov 3: *0* · Week to date: *0 / 10*" in "\n".join(r._offer_lines(z, dt.date(2026, 11, 3)))
 
 
 def test_summary_counts_and_monday_shows_last_week_final():
@@ -502,7 +502,7 @@ def test_summary_counts_and_monday_shows_last_week_final():
                         "followups": 1, "voicemails": 0, "review": 1, "presenters": {K: 2}}
     assert o["week"]["offers"] == 3 and o["week"]["properties"] == 2
     lines = "\n".join(r._offer_lines(o, dt.date(2026, 11, 6)))
-    assert "Fri Nov 6: *2 / 10* · Week final: *3 / 50*" in lines          # Monday's report covers Friday
+    assert "Fri Nov 6: *2* · Week final: *3 / 10*" in lines          # Monday's report covers Friday
     assert "Initial 1 · Revised 1 · Live call 0 · Text 1 · Written 1 · Properties 2 (week: 2)" in lines
     assert "unchanged price this week: 1" in lines and "Waiting for review or a correction this week: 1" in lines
     assert "$" not in lines
@@ -511,7 +511,7 @@ def test_summary_counts_and_monday_shows_last_week_final():
 def test_first_tracked_week_is_labelled_partial():
     o = r.summarize_offers(offers_of([]), dt.date(2026, 10, 30), tracked_from=dt.date(2026, 10, 30))
     text = "\n".join(r._offer_lines(o, dt.date(2026, 10, 30)))
-    assert "Week final: *0* (partial week: tracking began Fri Oct 30, so not compared to 50)" in text
+    assert "Week final: *0* (partial week: tracking began Fri Oct 30, so not compared to 10)" in text
     assert "/ 50" not in text
 
 
@@ -590,7 +590,7 @@ def test_run_offer_flags_go_internal_only(tmp_path, monkeypatch):
     assert "does not match the format" not in review                       # Tuesday's flag is not re-sent Monday
     assert "Still open from earlier days (2;" in review and "Tue Oct 27 (malformed)" in review   # ...but stays listed
     sent = post.sent[0]
-    assert "Fri Oct 30: *1 / 10* · Week final: *1 / 50*" in sent and "Waiting for review or a correction this week: 3" in sent
+    assert "Fri Oct 30: *1* · Week final: *1 / 10*" in sent and "Waiting for review or a correction this week: 3" in sent
     assert "Ty" not in sent and "$" not in sent and "dollar amount" not in sent
 
 
