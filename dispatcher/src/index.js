@@ -21,6 +21,13 @@ const JOBS = [
   { mode: "sms-responder", everyMinutes: 5, fromHour: 7, toHour: 23, daily: true,
     workflow: "sms-auto-responder.yml", inputs: { since_minutes: "180" } },
 ];
+// Central dates with no caller (Rahaf off): every weekday/slot job (am-start, pm-texts, audit,
+// weekly-topup) is skipped; `daily` jobs (the draft-only SMS responder, which also runs the drip
+// exit guard and line/call watches) still run so replies keep getting logged. Keep in sync with
+// NO_TEXT_DAYS in src/pm_text_sender.py. DataSift's own drips are not affected by this list.
+const SKIP_DATES = {
+  "2026-11-26": "Thanksgiving",
+};
 const TOLERANCE_MIN = 5;
 const INTERVAL_CRON = "*/5 * * * *";  // must match the interval entry in wrangler.toml
 const WEEKDAYS = new Set(["Mon", "Tue", "Wed", "Thu", "Fri"]);
@@ -41,6 +48,7 @@ function jobsForNow(now) {
   const mins = now.hour * 60 + now.minute;
   return JOBS.filter((j) => {
     if (j.onDate && j.onDate !== now.date) return false;
+    if (SKIP_DATES[now.date] && !j.daily) return false;
     if (j.days) { if (!j.days.includes(now.weekday)) return false; }
     else if (!j.daily && !WEEKDAYS.has(now.weekday)) return false;
     if (j.everyMinutes) return now.hour >= j.fromHour && now.hour < j.toHour && now.minute % j.everyMinutes === 0;
@@ -139,7 +147,7 @@ export default {
       return new Response(r.ok ? `dispatched ${mode}` : `failed HTTP ${r.status} ${r.body}`, { status: r.ok ? 200 : 502 });
     }
     const due = jobsForNow(now).map((j) => j.mode);
-    return new Response(JSON.stringify({ central: now, due_now: due, jobs: JOBS, token_set: Boolean(env.GITHUB_TOKEN) }, null, 2),
+    return new Response(JSON.stringify({ central: now, due_now: due, skip_today: SKIP_DATES[now.date] || null, skip_dates: SKIP_DATES, jobs: JOBS, token_set: Boolean(env.GITHUB_TOKEN) }, null, 2),
       { headers: { "Content-Type": "application/json" } });
   },
 };

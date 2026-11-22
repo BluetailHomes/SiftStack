@@ -74,6 +74,13 @@ DIAL_FLOOR = 150             # daily dial floor (rahaf-kpi-scorecard production 
 SESSION_GAP_MIN = 15         # actions closer than this count as continuous work
 BREAK_MIN = 30               # gaps at least this long inside the shift are listed
 SEND_WINDOW = (16, 18)   # Central hours during which a scheduled --send is allowed
+# Central dates with no caller and no seller texts (Rahaf off). On these days pm-texts and
+# extra-texts send nothing and the audit does not run, unless --force; the next morning's
+# audit-check also skips them. Keep in sync with SKIP_DATES in dispatcher/src/index.js.
+# DataSift's own drips are NOT covered by this; pause or pull those separately.
+NO_TEXT_DAYS = {
+    "2026-11-26": "Thanksgiving (Rahaf off)",
+}
 TERMINAL_MARKS = {"CORRECT", "WRONG", "DEAD", "DNC", "CORRECT_DNC", "WRONG_DNC"}   # marks that end the afternoon text for a number
 BAD_MARKS = {"WRONG", "DEAD", "DNC", "CORRECT_DNC", "WRONG_DNC"}                    # marks that disqualify a number as the drip's primary phone
 # P1's review tags (verified in DataSift 2026-10-27). Property details carry tag titles, so the
@@ -115,6 +122,11 @@ def to_ct(ts: str) -> dt.datetime | None:
     except (ValueError, TypeError):
         return None
     return (u + _central_offset(u)).replace(tzinfo=dt.timezone(_central_offset(u)))
+
+
+def no_text_day(day: str | dt.date) -> str | None:
+    """The reason `day` (Central) is a no-text day, else None."""
+    return NO_TEXT_DAYS.get(day.isoformat() if isinstance(day, dt.date) else day)
 
 
 def ct_now() -> dt.datetime:
@@ -635,6 +647,9 @@ def run_pm_texts(args) -> int:
     if live and not args.force and not _in_window(args.only_between or f"{SEND_WINDOW[0]}-{SEND_WINDOW[1]}"):
         print(f"Outside send window {args.only_between or SEND_WINDOW} Central (now {ct_now():%H:%M}); nothing sent. Use --force to override.")
         return 0
+    if live and not args.force and no_text_day(day):
+        print(f"{day} is a no-text day ({no_text_day(day)}); nothing sent. Use --force to override.")
+        return 0
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     state_file = STATE_DIR / f"sent_{day}.json"
     sent_log = json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else []
@@ -894,6 +909,9 @@ def _in_window(spec: str) -> bool:
 def run_audit(args) -> int:
     """7:15 PM caller audit. Writes audit_posted_<day>.json (read by the next-morning
     audit-check) and exits 1 when the report could not be posted, so the workflow alert fires."""
+    if not args.day and no_text_day(ct_now().date()):
+        print(f"Today is a no-text day ({no_text_day(ct_now().date())}); no audit.")
+        return 0
     if args.only_between and not _in_window(args.only_between):
         print(f"Outside window {args.only_between} Central (now {ct_now():%H:%M}); skipping.")
         # Only the dispatcher's run is meant to land inside the window; the off-season GitHub
@@ -929,7 +947,7 @@ def run_audit(args) -> int:
 
 def prev_business_day(d: dt.date) -> dt.date:
     d -= dt.timedelta(days=1)
-    while d.weekday() >= 5:
+    while d.weekday() >= 5 or no_text_day(d):
         d -= dt.timedelta(days=1)
     return d
 
@@ -1376,6 +1394,9 @@ def run_extra_texts(args) -> int:
     live = bool(args.send)
     if live and not args.force and args.only_between and not _in_window(args.only_between):
         print(f"Outside window {args.only_between} Central (now {ct_now():%H:%M}); nothing sent.")
+        return 0
+    if live and not args.force and no_text_day(ct_now().date()):
+        print(f"Today is a no-text day ({no_text_day(ct_now().date())}); nothing sent. Use --force to override.")
         return 0
     api = Sift(_env("REISIFT_API_KEY") or sys.exit("REISIFT_API_KEY missing"))
     day = ct_now().date().isoformat()
