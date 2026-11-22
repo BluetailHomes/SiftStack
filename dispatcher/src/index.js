@@ -12,10 +12,12 @@ const JOBS = [
   { mode: "pm-texts", hour: 16, minute: 30 },
   { mode: "audit", hour: 19, minute: 15 },
   // Friday-evening top-up of Rahaf's Jackson P1 queue for Monday (src/weekly_topup.py).
-  // Moved from Sunday; the last Sunday run is 2026-11-08 (delete that entry, and SUN,MON
-  // from its cron in wrangler.toml, any time after).
   { mode: "weekly-topup", hour: 18, minute: 0, days: ["Fri"], workflow: "weekly-topup.yml" },
-  { mode: "weekly-topup", hour: 18, minute: 0, days: ["Sun"], onDate: "2026-11-08", workflow: "weekly-topup.yml" },
+  // Thanksgiving 2026, one time: after Wednesday's drip text, move every 5-day drip whose next
+  // text is due Thu 11-26 to its line's one-text "last try" drip on Fri 11-27 9:50 CT
+  // (src/holiday_drip_pause.py). Shares the 18:00 cron with weekly-topup. Delete after 11-25.
+  { mode: "holiday-drip-pause", hour: 18, minute: 0, days: ["Wed"], onDate: "2026-11-25",
+    workflow: "holiday-drip-pause.yml", inputs: { live: "true" } },
   // Inbound-text responder: poll every 5 minutes while sellers can be replying (the drip can
   // send until ~11 PM Central). 180-minute lookback so a missed poll never loses a reply.
   { mode: "sms-responder", everyMinutes: 5, fromHour: 7, toHour: 23, daily: true,

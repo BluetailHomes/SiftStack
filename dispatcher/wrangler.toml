@@ -32,7 +32,7 @@ crons = [
   "30 21,22 * * MON-FRI",  # 16:30 Central pm-texts
   "15 0,1 * * TUE-SAT",    # 19:15 Central audit (already the next day in UTC, so Mon-Fri evenings = Tue-Sat UTC)
   "*/5 * * * *",       # sms-responder poll; src/index.js limits it to 07:00-22:59 Central, every day
-  "0 0,23 * * FRI,SAT,SUN,MON",  # 18:00 Central weekly-topup, Fridays (+ the last Sunday run 2026-11-08; drop SUN,MON after)
+  "0 0,23 * * THU,FRI,SAT",  # 18:00 Central: weekly-topup Fridays (Fri 18:00 CST = Sat 00:00 UTC) + holiday-drip-pause Wed 2026-11-25 (= Thu 00:00 UTC)
 ]                      # 5 of 5 free-plan cron triggers used
 
 [observability]

@@ -1,0 +1,49 @@
+name: Holiday Drip Pause (Thanksgiving 2026)
+
+# One-time job (see src/holiday_drip_pause.py). Wed 2026-11-25 ~18:00 CT the
+# Cloudflare dispatcher starts it with live=true: every 5-day morning-text drip
+# whose next text is due Thanksgiving (Thu 11-26) is removed from that drip and
+# re-enrolled in its line's one-text "last try" drip, which sends Fri 11-27
+# ~9:50 CT from the same number. A manual run defaults to a dry run.
+# No schedule: cron on purpose (the dispatcher is the only trigger).
+
+on:
+  workflow_dispatch:
+    inputs:
+      live:
+        description: Make the changes ("true") or only report them
+        required: false
+        default: "false"
+
+jobs:
+  move:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Move Thursday drip texts to Friday's last text
+        env:
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ "${{ inputs.live }}" = "true" ]; then
+            python src/holiday_drip_pause.py run --live
+          else
+            python src/holiday_drip_pause.py run
+          fi
+
+      - name: Keep the run state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: holiday-drip-pause
+          path: output/pm_texts/holiday_drip_pause_*.json
+          if-no-files-found: ignore
